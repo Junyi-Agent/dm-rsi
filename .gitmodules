@@ -1,0 +1,11 @@
+[submodule "decision-policy"]
+	path = subrsi/decision-policy
+	url = https://github.com/Jireh-Chen/DM-RSI-Framework
+	branch = main
+[submodule "data"]
+	path = subrsi/data
+	url = https://github.com/BingqiaoL/DM-RSI-Framework
+	branch = data-generation-0.3
+[submodule ".claude/jy-skills"]
+	path = .claude/jy-skills
+	url = https://github.com/Junyi-Agent/skills.git

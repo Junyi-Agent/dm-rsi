@@ -1,0 +1,31 @@
+# dm-rsi 的项目配置。机器相关的路径可以用环境变量覆盖：DMRSI_HOME。
+home: /ssd1/junyi/jev/dmrsi          # 数据、分数、run 产物、审批队列；不进 git
+
+github:
+  self: Junyi-Agent/dm-rsi                 # sub-RSI 给 dm-rsi 提 issue 的地方
+  upstream: Jireh-Chen/DM-RSI-Framework    # dm-rsi 给各方向提 issue 的地方（Data 的 fork 关了 issues）
+
+# 各方向。submodule / package 为空表示还没有 sub-RSI（dm-rsi 直接调度）。
+directions:
+  decision-policy:
+    owner: Yile
+    issue_prefix: "[decision-policy]"
+    submodule: subrsi/decision-policy
+    branch: main
+    package: rsi_skills/decision_policy
+    module: dpolicy
+  data:
+    owner: Bingqiao
+    github_login: BingqiaoL
+    issue_prefix: "[data]"
+    submodule: subrsi/data
+    branch: data-generation-0.3
+    package: rsi_skills/data
+    module: dgen
+  training:
+    owner: CD
+    issue_prefix: "[training]"
+
+backends:
+  local: {kind: local}
+  xtrah200: {kind: taskmgr, host: xtrah200, max_gpus: 2, min_free_gb: 40}

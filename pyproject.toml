@@ -1,0 +1,68 @@
+[project]
+name = "dm-rsi"
+version = "0.1.0"
+description = "Meta RSI for DM-RSI-Framework: one entry point that runs, monitors and coordinates the per-direction sub-RSIs"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "pyyaml>=6.0.2",
+    "xtra-rsi",
+]
+
+[project.scripts]
+dm-rsi = "dm_rsi.cli:main"
+
+[project.entry-points."xtra_rsi.profiles"]
+dm = "dm_rsi.profile:profile"
+
+[project.entry-points."xtra_rsi.viz"]
+dm = "dm_rsi.viz:describe"
+
+[dependency-groups]
+dev = [
+  "basedpyright>=1.29",
+  "pytest>=8.3",
+  "ruff>=0.11",
+  "types-pyyaml>=6.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.12.5,<0.13.0"]
+build-backend = "uv_build"
+
+[tool.uv.sources]
+xtra-rsi = { git = "https://github.com/Junyi-Agent/xtra-rsi", rev = "v0.4.5" }
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+src = ["src", "tests"]
+extend-exclude = ["subrsi", ".claude/jy-skills"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+  "COM812",                     # 与 ruff format 冲突
+  "D203", "D213",               # 与 D211 / D212 互斥
+  "D100", "D104",               # 模块级 docstring 不强制
+  "D400", "D415",               # docstring 用中文句号结尾
+  "CPY001",                     # 不要求版权头
+  "RUF001", "RUF002", "RUF003", # 中文注释/字符串里的全角标点是故意的
+  "TD002", "TD003", "FIX002",   # TODO 不强制作者和 issue 链接
+  "E501",                       # 行宽交给 ruff format；中文说明字符串不强行折行
+  "S603", "S607",               # 调外部命令（gh、git、task、sub-RSI CLI）是本项目的本职
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "D", "PLR2004", "INP001", "ANN", "ARG"]
+
+[tool.basedpyright]
+typeCheckingMode = "standard"
+pythonVersion = "3.13"
+include = ["src", "tests"]
+exclude = ["subrsi", ".claude", ".venv", "**/__pycache__"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "--strict-config", "-ra"]
+markers = ["slow: 调用 sub-RSI 真实 CLI 的端到端测试（约 1 分钟）"]
