@@ -5,10 +5,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from dm_rsi import pipeline, steps, yamlfile
+from dm_rsi import steps, workspace, yamlfile
 from dm_rsi.approvals import ApprovalStore, Kind, State
 from dm_rsi.backends.base import JobRef, JobState
-from dm_rsi.pipeline import Outcome, StepDef, StepState, step_kind
+from dm_rsi.workspace import Outcome, StepState, step_kind
 
 _ = steps  # 注册步骤种类
 
@@ -61,24 +61,23 @@ def test_train_needs_approval_then_runs_in_foreground_on_gpu_backend(cfg, tmp_pa
     ojh.write_text(FAKE_OJH.replace("#!/usr/bin/env python3", f"#!{sys.executable}"))
     ojh.chmod(0o755)
     monkeypatch.setenv("FAKE_OUT", str(tmp_path / "out"))
-    steps = [
-        StepDef("inputs", "test.inputs"),
-        StepDef("train-base", "elliptic.train", ("inputs",), {"model": "BASE"}),
-    ]
-    run = pipeline.create(
-        cfg, "ell", "t", steps, {"gpu_backend": "gpu", "ojh_bin": str(ojh), "ojh_python": "/py"}
+    ws = workspace.open_or_create(
+        cfg, "ell", "elliptic", {"gpu_backend": "gpu", "ojh_bin": str(ojh), "ojh_python": "/py"}
     )
+    store0 = ApprovalStore(cfg.approvals_dir)
+    ws.run_step(ws.add("inputs", "test.inputs", {}).name, store0, {})
+    name = ws.add("train_base", "elliptic.train", {"model": "BASE"}).name
     store = ApprovalStore(cfg.approvals_dir)
     gpu = FakeGpu()
 
-    res = run.advance(store, {"gpu": gpu})
+    res = ws.run_step(name, store, {"gpu": gpu})
     assert res["state"] == "blocked"
     [a] = store.all()
     assert a.kind is Kind.TRAIN
     assert gpu.submitted == []  # 没批准不提交
 
     store.decide(a.id, approve=True)
-    res = pipeline.load(cfg, "ell").advance(store, {"gpu": gpu})
+    res = workspace.load(cfg, "ell").run_step(name, store, {"gpu": gpu})
     assert res["state"] == "running"
     [spec] = gpu.submitted
     assert spec.gpus == 2
@@ -91,20 +90,20 @@ def test_train_needs_approval_then_runs_in_foreground_on_gpu_backend(cfg, tmp_pa
     assert machine["gpu_source"] == "preassigned"
 
     # 轮询：仍在跑，不重复登记审批、不重复提交
-    res = pipeline.load(cfg, "ell").advance(store, {"gpu": gpu})
+    res = workspace.load(cfg, "ell").run_step(name, store, {"gpu": gpu})
     assert res["state"] == "running"
     assert len(store.all()) == 1
     assert len(gpu.submitted) == 1
 
     # 作业结束但 runner 没写 DONE：失败
     gpu.state = JobState.DONE
-    res = pipeline.load(cfg, "ell").advance(store, {"gpu": gpu})
+    res = workspace.load(cfg, "ell").run_step(name, store, {"gpu": gpu})
     assert res["state"] == "failed"
 
     # 写了 DONE：再推进一次（失败的步骤会重试，作业引用还在）就成功
     Path(tmp_path / "out" / "run1" / "DONE").write_text("exit_code: 0\n")
-    res = pipeline.load(cfg, "ell").advance(store, {"gpu": gpu})
+    res = workspace.load(cfg, "ell").run_step(name, store, {"gpu": gpu})
     assert res["state"] == "done"
     assert len(gpu.submitted) == 1
-    out = pipeline.load(cfg, "ell").step_state("train-base")["outputs"]
+    out = workspace.load(cfg, "ell").step_state(name)["outputs"]
     assert out["run_dirs"] == {"BASE": str(tmp_path / "out" / "run1")}

@@ -14,15 +14,15 @@ import subprocess
 from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv, yamlfile
-from dm_rsi.pipeline import Outcome, StepState, step_kind
 from dm_rsi.steps import judge
+from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from xtra_rsi.payload import Payload, Value
 
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 DEFAULTS: Payload = {
     "protocol": {"by": "step", "select_frac": 0.4},
@@ -109,20 +109,27 @@ def _with_columns(ctx: StepContext, path: str) -> tuple[str | None, list[str]]:
     return path, [c for c in proc.stdout.strip().split(",") if c]
 
 
-def config_path(ctx: StepContext, replicate: int) -> Path:
+def dp_dir(ctx: StepContext, model: str) -> Path:
+    """某个模型的 Decision Policy 运行目录。同一个模型多次执行 dp_rsi 是在同一个 dpolicy run 上多跑几轮。"""
+    return ctx.ws.dir / "dp-rsi" / model
+
+
+def config_path(ctx: StepContext, model: str, replicate: int) -> Path:
     """副本 ``replicate`` 的运行配置。"""
-    return ctx.run.dir / "dp-rsi" / f"dpolicy_r{replicate}.yaml"
+    return dp_dir(ctx, model) / f"dpolicy_r{replicate}.yaml"
 
 
-def _write_config(ctx: StepContext, replicate: int, feat: tuple[str | None, list[str]]) -> Path:
-    path = config_path(ctx, replicate)
+def _write_config(
+    ctx: StepContext, model: str, replicate: int, feat: tuple[str | None, list[str]]
+) -> Path:
+    path = config_path(ctx, model, replicate)
     if path.is_file():
         return path
     pkg = ctx.cfg.direction("decision-policy").package_dir(ctx.cfg.root)
     assert pkg is not None  # noqa: S101
     data: Payload = {
         "scores_dir": str(ctx.find_output("scores_dir")),
-        "name": str(ctx.find_output("model")),
+        "name": model,
         "val_split": "val",
         "test_split": "test",
         "step_from_id": bool(ctx.param("step_from_id", False)),
@@ -137,8 +144,8 @@ def _write_config(ctx: StepContext, replicate: int, feat: tuple[str | None, list
         "seed": replicate,
     }
     cfg: Payload = {
-        "run_name": f"{ctx.run.run_id}-r{replicate}",
-        "out_dir": str(ctx.run.dir / "dp-rsi" / f"r{replicate}"),
+        "run_name": f"{ctx.ws.id}-{model}-r{replicate}",
+        "out_dir": str(dp_dir(ctx, model) / f"r{replicate}"),
         "data": data,
         **DEFAULTS,
         "baseline": str(pkg / "configs" / "policies" / "baseline_f1.yaml"),
@@ -151,20 +158,32 @@ def _write_config(ctx: StepContext, replicate: int, feat: tuple[str | None, list
 
 @step_kind("dpolicy.rsi")
 def rsi(ctx: StepContext) -> Outcome:
-    """Decision Policy RSI 到 evolve / consensus 为止（final-test 是单独的步骤，要审批）。"""
+    """运行 Decision Policy RSI，到 evolve / consensus 为止（final-test 是单独的流程，要审批）。
+
+    用对比选出的模型（``model``）的分数。``rounds`` 是这次执行要**再**跑几轮（提案 + evolve）：
+    同一个模型多次执行 dp_rsi 会接着上次的 incumbent 继续。
+    """
     subenv.ensure_env(ctx.cfg)
+    model = str(ctx.find_output("model"))
+    base = dp_dir(ctx, model)
     feat = _features(ctx)
     replicates = int(cast("int", ctx.param("replicates", 1)))
     rounds = int(cast("int", ctx.param("rounds", 1)))
+    first = int(
+        cast(
+            "int",
+            ctx.data.setdefault("first_round", len(list((base / "r0").glob(".dmrsi-round*.done")))),
+        )
+    )
     confs: list[Path] = []
     for r in range(replicates):
-        conf = _write_config(ctx, r, feat)
+        conf = _write_config(ctx, model, r, feat)
         confs.append(conf)
-        out = ctx.run.dir / "dp-rsi" / f"r{r}"
+        out = base / f"r{r}"
         _dpolicy(ctx, f"check-r{r}", "check", str(conf))
         if not (out / "incumbent.yaml").is_file():
             _dpolicy(ctx, f"init-r{r}", "init", str(conf))
-        for k in range(rounds):
+        for k in range(first, first + rounds):
             done = out / f".dmrsi-round{k}.done"
             if done.is_file():
                 continue
@@ -180,22 +199,24 @@ def rsi(ctx: StepContext) -> Outcome:
                 judge.write_proposals(ctx, proposals, diag, feat[1])
             else:
                 # 副本用和 r0 相同的提案，只改 seed
-                src = ctx.run.dir / "dp-rsi" / "r0" / "proposals"
+                src = base / "r0" / "proposals"
                 if proposals.is_dir():
                     shutil.rmtree(proposals)
                 shutil.copytree(src, proposals)
             _dpolicy(ctx, f"evolve-r{r}-k{k}", "evolve", str(conf))
             done.write_text(yamlfile.now())
     outputs: Payload = {
+        "dp_model": model,
+        "dp_dir": str(base),
         "dp_configs": [str(c) for c in confs],
-        "incumbent": str(ctx.run.dir / "dp-rsi" / "r0" / "incumbent.yaml"),
-        "dp_report": str(ctx.run.dir / "dp-rsi" / "r0" / "report.md"),
+        "incumbent": str(base / "r0" / "incumbent.yaml"),
+        "dp_report": str(base / "r0" / "report.md"),
     }
-    note = f"{replicates} 个副本 × {rounds} 轮"
+    note = f"模型 {model}：{replicates} 个副本 × 第 {first + 1}–{first + rounds} 轮"
     if replicates > 1:
         text = _dpolicy(ctx, "consensus", "consensus", *map(str, confs))
         (ctx.dir / "consensus.txt").write_text(text)
-        pick = ctx.run.dir / "dp-rsi" / "r0" / "consensus.yaml"
+        pick = base / "r0" / "consensus.yaml"
         outputs["consensus"] = str(pick) if pick.is_file() else None
         note += "，共识：" + ("有" if pick.is_file() else "没有候选过半通过")
     return Outcome(StepState.DONE, note, outputs=outputs)

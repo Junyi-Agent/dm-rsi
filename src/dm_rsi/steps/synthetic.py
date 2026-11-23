@@ -11,13 +11,13 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv
-from dm_rsi.pipeline import Outcome, StepState, step_kind
 from dm_rsi.steps.contracts import check_scores
+from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
     from xtra_rsi.payload import Payload
 
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 SPLITS = ["pool", "val", "test"]
 
@@ -26,7 +26,7 @@ SPLITS = ["pool", "val", "test"]
 def make_data(ctx: StepContext) -> Outcome:
     """生成合成表。"""
     subenv.ensure_env(ctx.cfg)
-    data = ctx.run.dir / "data"
+    data = ctx.ws.dir / "data"
     if not (data / "train.csv").is_file():
         subenv.run_module(
             ctx.cfg,
@@ -55,7 +55,7 @@ def make_data(ctx: StepContext) -> Outcome:
 
 
 def _score(ctx: StepContext, train: str, model: str) -> Payload:
-    scores = ctx.run.dir / "scores"
+    scores = ctx.ws.dir / "scores"
     if not (scores / f"{model}_val.parquet").is_file():
         subenv.run_module(
             ctx.cfg,
@@ -90,18 +90,28 @@ def score(ctx: StepContext) -> Outcome:
         StepState.DONE,
         f"{model}: val {cast('Payload', report['val'])['rows']} 行",
         outputs={
-            "scores_dir": str(ctx.run.dir / "scores"),
+            "scores_dir": str(ctx.ws.dir / "scores"),
             "base_model": model,
             "models": {"base": model},
         },
     )
 
 
+def arms_to_train(ctx: StepContext) -> list[Payload]:
+    """要重训的配方：决策给了 ``recipes``（hash 列表）就只训这些，否则训所有还没有模型的。"""
+    arms = cast("list[Payload]", ctx.find_output("arms"))
+    have = cast("dict[str, str]", ctx.ws.latest_output("models") or {})
+    want = ctx.param("recipes")
+    if isinstance(want, list):
+        return [a for a in arms if str(a["hash"]) in {str(w) for w in want}]
+    return [a for a in arms if str(a["hash"]) not in have]
+
+
 @step_kind("synthetic.retrain")
 def retrain(ctx: StepContext) -> Outcome:
     """对每个训练文件各「重训 + 打分」一次。模型名 ``A<hash 前 8 位>``。"""
-    arms = cast("list[Payload]", ctx.find_output("arms"))
-    models: dict[str, str] = {"base": str(ctx.find_output("base_model"))}
+    arms = arms_to_train(ctx)
+    models: dict[str, str] = dict(cast("dict[str, str]", ctx.find_output("models")))
     for arm in arms:
         name = f"A{str(arm['hash'])[:8]}"
         _score(ctx, str(arm["train_path"]), name)
@@ -109,5 +119,5 @@ def retrain(ctx: StepContext) -> Outcome:
     return Outcome(
         StepState.DONE,
         f"重训 {len(arms)} 组",
-        outputs={"scores_dir": str(ctx.run.dir / "scores"), "models": cast("Payload", models)},
+        outputs={"scores_dir": str(ctx.ws.dir / "scores"), "models": cast("Payload", models)},
     )

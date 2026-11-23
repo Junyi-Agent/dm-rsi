@@ -6,18 +6,18 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv
 from dm_rsi.approvals import Kind, State
-from dm_rsi.pipeline import Outcome, StepState, step_kind
 from dm_rsi.steps import dgen as dgen_step
-from dm_rsi.steps import dpolicy as dp_step
+from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
     from xtra_rsi.payload import Payload, Value
 
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 
 def _val_summary(ctx: StepContext) -> list[str]:
@@ -38,7 +38,7 @@ def _val_summary(ctx: StepContext) -> list[str]:
         )
     if chosen == "base":
         lines.append("  Data：没有配方通过，Decision Policy 用的是基线模型")
-    arch = ctx.run.dir / "dp-rsi" / "r0" / "archive.jsonl"
+    arch = Path(str(ctx.find_output("dp_dir"))) / "r0" / "archive.jsonl"
     if arch.is_file():
         recs = [json.loads(x) for x in arch.read_text().splitlines() if x.strip()]
         base = next((r for r in recs if r.get("source") == "baseline"), None)
@@ -57,7 +57,7 @@ def _val_summary(ctx: StepContext) -> list[str]:
 
 def _explain(ctx: StepContext, models: dict[str, str], *, synthetic: bool) -> str:
     head = [
-        f"流程 {ctx.run.run_id}（模板 {ctx.run.template}）前面的步骤都跑完了，最后一步是在 test 上各测一次：",
+        f"工作区 {ctx.ws.id}（模板 {ctx.ws.template}）val 上的流程都跑完了，最后一段是在 test 上各测一次：",
         f"  - Data：{len(models) - 1} 个重训模型 vs 基线（dgen final-test）",
         "  - Decision Policy：基线策略 vs val 上选出的 incumbent（dpolicy final-test）",
         "为什么问你：test 每个 run 只能读一次，读了之后就不能再拿 test 的结果回头改选择（两个 sub-RSI 的规则）。",
@@ -80,18 +80,18 @@ def _explain(ctx: StepContext, models: dict[str, str], *, synthetic: bool) -> st
 def final_test(ctx: StepContext) -> Outcome:
     """审批 → dgen final-test → dpolicy final-test。"""
     models = cast("dict[str, str]", ctx.find_output("models"))
-    dp_conf = dp_step.config_path(ctx, 0)
-    consensus = ctx.run.dir / "dp-rsi" / "r0" / "consensus.yaml"
+    dp_conf = Path(str(cast("list[str]", ctx.find_output("dp_configs"))[0]))
+    consensus = dp_conf.parent / "r0" / "consensus.yaml"
     plan: Payload = {
         "data": f"dgen final-test：{len(models) - 1} 个重训模型 vs 基线，在 test 上一次",
         "decision_policy": f"dpolicy final-test：baseline vs incumbent{'（含共识选择）' if consensus.is_file() else ''}，在 test 上一次",
         "dgen_config": str(dgen_step.config_path(ctx)),
         "dpolicy_config": str(dp_conf),
     }
-    synthetic = ctx.run.template == "synthetic"
+    synthetic = ctx.ws.template == "synthetic"
     a = ctx.gate(
         Kind.FINAL_TEST,
-        f"流程 {ctx.run.run_id} 的 final-test（{'合成数据' if synthetic else '真实数据'}，读 test，每个 run 只一次）",
+        f"流程 {ctx.ws.id} 的 final-test（{'合成数据' if synthetic else '真实数据'}，读 test，每个 run 只一次）",
         "final",
         plan,
         explain=_explain(ctx, models, synthetic=synthetic),
@@ -100,7 +100,7 @@ def final_test(ctx: StepContext) -> Outcome:
         return ctx.blocked_on(a, "final-test")
 
     results: Payload = {}
-    dg_out = ctx.run.dir / "data-rsi" / "out" / "final_test" / "final" / "final_test.json"
+    dg_out = ctx.ws.dir / "data-rsi" / "out" / "final_test" / "final" / "final_test.json"
     if len(models) > 1:
         if not dg_out.is_file():
             runs = ",".join(f"{k}={v}" for k, v in models.items())
@@ -118,10 +118,10 @@ def final_test(ctx: StepContext) -> Outcome:
                 log_dir=ctx.log_dir,
                 name="dgen-final-test",
             )
-        found = next((ctx.run.dir / "data-rsi" / "out").rglob("final_test.json"), None)
+        found = next((ctx.ws.dir / "data-rsi" / "out").rglob("final_test.json"), None)
         results["data"] = str(found) if found else None
 
-    dp_json = ctx.run.dir / "dp-rsi" / "r0" / "final_test.json"
+    dp_json = dp_conf.parent / "r0" / "final_test.json"
     if not dp_json.is_file():
         args = ["final-test", str(dp_conf), "--allow-test"]
         if consensus.is_file():

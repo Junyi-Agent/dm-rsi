@@ -1,18 +1,18 @@
-"""ADR 0001 P3：meta loop（xtra-rsi profile dm）和 agent 判断步骤。"""
+"""ADR 0001（修订）：meta loop。观察、推理、决策由 dm-rsi 做，行动执行决策选中的那段流程。"""
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 
 import pytest
 from xtra_rsi import Stage, StageContext, run_loop
 
-from dm_rsi import pipeline, profile
-from dm_rsi.approvals import ApprovalStore, Kind
-from dm_rsi.templates import synthetic
+from dm_rsi import flows, profile, workspace
+from dm_rsi.approvals import ApprovalStore, Kind, State
+from dm_rsi.yamlfile import read
 
-# 假 claude：从 --add-dir 的最后一个目录（writes）写一个配方 / 提案，打印 claude -p 的 JSON
 FAKE_CLAUDE = r"""#!__PY__
 import json, shutil, sys
 from pathlib import Path
@@ -41,6 +41,8 @@ def fake_claude(tmp_path, monkeypatch):
 @pytest.fixture
 def meta_env(cfg_with_env, gh, monkeypatch):
     monkeypatch.setenv("DMRSI_HOME", str(cfg_with_env.home))
+    monkeypatch.setenv("DMRSI_WORKSPACE", "t")
+    monkeypatch.setenv("DMRSI_TEMPLATE", "synthetic")
     monkeypatch.setattr(profile, "_gh", lambda: gh)
     return cfg_with_env
 
@@ -49,78 +51,122 @@ def _ctx(stage, upstream):
     return StageContext(stage=stage, iteration=0, upstream=upstream)
 
 
-def test_decision_prefers_advance_and_skips_issued_failures():
-    up = {
-        "findings": [
-            {
-                "kind": "step_failed",
-                "run": "r",
-                "step": "dp-rsi",
-                "owner": "decision-policy",
-                "suggest": "draft_issue",
-            },
-            {"kind": "runnable", "run": "r2", "step": "x", "suggest": "advance"},
-        ],
-        "lessons": [],
+def _dirty(cfg):
+    out = []
+    for d in cfg.directions.values():
+        if d.submodule:
+            cmd = ["git", "-C", str(cfg.root / d.submodule), "status", "--porcelain"]
+            out += subprocess.run(cmd, capture_output=True, text=True, check=True).stdout.split()
+    return out
+
+
+def test_decision_priorities():
+    nxt = {"kind": "next_flow", "flow": "data_rsi", "args": {}, "evidence": "缺", "suggest": "flow"}
+    opened = {
+        "kind": "open_execution",
+        "step": "003-retrain",
+        "flow": "retrain",
+        "suggest": "resume",
     }
-    assert profile.decision(_ctx(Stage.DECISION, up))["plan"]["action"] == "advance"
-    up["findings"] = up["findings"][:1]
-    assert profile.decision(_ctx(Stage.DECISION, up))["plan"]["action"] == "draft_issue"
-    up["lessons"] = ["issue:r/dp-rsi"]
-    assert profile.decision(_ctx(Stage.DECISION, up))["plan"]["action"] == "wait"
+    waiting = {"kind": "waiting_human", "step": "003-retrain", "flow": "retrain", "suggest": "wait"}
+    failed = {
+        "kind": "flow_failed",
+        "step": "004-dp_rsi",
+        "flow": "dp_rsi",
+        "owner": "decision-policy",
+        "suggest": "draft_issue",
+    }
+
+    def plan(*fs, lessons=()):
+        up = {"findings": list(fs), "lessons": list(lessons)}
+        return profile.decision(_ctx(Stage.DECISION, up))["plan"]
+
+    assert plan(nxt) == {"action": "flow", "flow": "data_rsi", "args": {}, "why": "缺"}
+    assert plan(opened, nxt)["action"] == "resume"  # 同一时间只执行一段
+    assert plan(waiting, nxt)["action"] == "wait"
+    assert plan(failed, nxt)["action"] == "draft_issue"
+    assert plan(failed, lessons=["issue:004-dp_rsi"])["action"] == "wait"
 
 
-def test_action_refuses_unknown_action():
+def test_action_refuses_unknown_action_and_flow(meta_env):
     out = profile.action(_ctx(Stage.ACTION, {"plan": {"action": "rm -rf"}}))
     assert "拒绝" in out["result"]["error"]
+    out = profile.action(
+        _ctx(Stage.ACTION, {"plan": {"action": "flow", "flow": "train_everything"}})
+    )
+    assert "动作表" in out["result"]["error"]
+    plan = {"action": "flow", "flow": "dp_rsi", "args": {"dpolicy": {}}}
+    out = profile.action(_ctx(Stage.ACTION, {"plan": plan}))
+    assert "不接受参数" in out["result"]["error"]
 
 
 @pytest.mark.slow
-def test_meta_loop_runs_synthetic_pipeline_from_zero_and_stops_at_gate(meta_env, tmp_path):
-    records = run_loop(profile.profile(), iterations=10, run_dir=tmp_path / "loop")
-    runs = pipeline.list_runs(meta_env)
-    assert len(runs) == 1
-    run = runs[0]
-    assert run.step_state("dp-rsi")["state"] == "done"
-    assert run.step_state("final-test")["state"] == "blocked"
+def test_meta_loop_runs_flows_in_action_and_stops_at_gate(meta_env, tmp_path):
+    loop = tmp_path / "loop"
+    records = run_loop(profile.profile(), iterations=20, run_dir=loop)
+    plans = [r.outputs[Stage.DECISION]["plan"] for r in records]
+    flows_run = [p["flow"] for p in plans if p["action"] == "flow"]
+    assert flows_run == [
+        "prepare_data",
+        "train_base",
+        "data_rsi",
+        "retrain",
+        "data_compare",
+        "dp_rsi",
+        "final_test",
+    ]
+    assert plans[-1]["action"] == "wait"
+    assert records[-1].last["stop"] is True
+
+    # 行动阶段的执行过程写进了本轮的 action.yaml（面板展开行动就能看到）
+    act = read(loop / "iter-0002" / "action.yaml")
+    assert act["result"]["flow"] == "data_rsi"
+    assert any("generate" in e["text"] for e in act["events"])
+
     [a] = ApprovalStore(meta_env.approvals_dir).all()
     assert a.kind is Kind.FINAL_TEST
-    actions = [r.outputs[Stage.ACTION]["action"] for r in records]
-    assert actions[0] == "new_run"
-    assert "advance" in actions
-    assert records[-1].last["stop"] is True
-    assert (tmp_path / "loop" / "status.yaml").is_file()
+    for words in ("合成数据", "val 上已经定下的结果", "批准：", "拒绝：", "建议："):
+        assert words in a.explain
+
+    # 测试夹具里的临时审批队列，扮演人
+    ApprovalStore(meta_env.approvals_dir).decide(a.id, approve=True)
+    records = run_loop(profile.profile(), iterations=5, run_dir=tmp_path / "loop2")
+    plans = [r.outputs[Stage.DECISION]["plan"] for r in records]
+    assert plans[0]["action"] == "resume"
+    assert "都完成了" in plans[-1]["why"]
+    ws = workspace.load(meta_env, "t")
+    final = ws.latest_output("dp_headline")
+    assert set(final) >= {"baseline", "incumbent"}
+    assert ApprovalStore(meta_env.approvals_dir).get(a.id).state is State.DONE
+    assert _dirty(meta_env) == []
 
 
 @pytest.mark.slow
-def test_failed_step_becomes_issue_draft_once(meta_env, gh, tmp_path):
-    steps, params = synthetic()
+def test_failed_flow_becomes_issue_draft_once(meta_env, gh, tmp_path, monkeypatch):
     # 合成 val 只有 1 个 step：用 dpolicy 默认的 by: step 协议必然失败（真实的契约问题）
-    steps = [
-        pipeline.StepDef(s.name, s.kind, s.needs, {"features": "from_rows"})
-        if s.name == "dp-rsi"
-        else s
-        for s in steps
-    ]
-    pipeline.create(meta_env, "broken", "synthetic", steps, params)
-    records = run_loop(profile.profile(), iterations=10, run_dir=tmp_path / "loop")
-    actions = [r.outputs[Stage.ACTION]["action"] for r in records]
+    monkeypatch.setitem(flows.TEMPLATES["synthetic"]["flows"], "dp_rsi", {"features": "from_rows"})
+    records = run_loop(profile.profile(), iterations=20, run_dir=tmp_path / "loop")
+    actions = [r.outputs[Stage.DECISION]["plan"]["action"] for r in records]
     assert actions.count("draft_issue") == 1
     [a] = [x for x in ApprovalStore(meta_env.approvals_dir).all() if x.kind is Kind.ISSUE]
     assert str(a.detail["issue_title"]).startswith("[decision-policy]")
     assert gh.created == []  # 只进审批队列
     assert records[-1].last["stop"] is True
+    assert "上次失败" in records[-1].outputs[Stage.DECISION]["plan"]["why"]
 
 
 @pytest.mark.slow
 def test_agent_judge_writes_recipes_and_records_usage(cfg_with_env, fake_claude):
-    steps, params = synthetic()
-    steps = steps[:3]  # make-data → score-base → data-rsi
-    run = pipeline.create(cfg_with_env, "agentic", "synthetic", steps, {**params, "judge": "agent"})
-    res = run.advance(ApprovalStore(cfg_with_env.approvals_dir), {})
-    assert res["state"] == "done", res
-    recipes = sorted(p.name for p in (run.dir / "data-rsi" / "out" / "recipes").glob("*.yaml"))
+    ws = workspace.open_or_create(
+        cfg_with_env, "agentic", "synthetic", {"judge": "agent", "seed": 0}
+    )
+    store = ApprovalStore(cfg_with_env.approvals_dir)
+    for flow in ("prepare_data", "train_base", "data_rsi"):
+        kind, params = flows.resolve("synthetic", flow, {})
+        res = ws.run_step(ws.add(flow, kind, params).name, store, {})
+        assert res["state"] == "done", res
+    recipes = sorted(p.name for p in (ws.dir / "data-rsi" / "out" / "recipes").glob("*.yaml"))
     assert recipes == ["agent_hard.yaml"]
-    [usage] = [json.loads(x) for x in (run.dir / "usage.jsonl").read_text().splitlines()]
+    [usage] = [json.loads(x) for x in (ws.dir / "usage.jsonl").read_text().splitlines()]
     assert usage["cost_usd"] == 0.12
     assert usage["direction"] == "data"

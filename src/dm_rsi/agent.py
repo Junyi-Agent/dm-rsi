@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
     from xtra_rsi.payload import Payload
 
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 TOOLS = "Read,Write,Edit,Glob,Grep"
 
@@ -58,7 +58,7 @@ def claude_argv(
 def _prompt(ctx: StepContext, skill: Path, task: str, writes: Path) -> str:
     return "\n".join(
         [
-            f"你是 dm-rsi（DM-RSI-Framework 的 meta RSI）调度的一个判断步骤，流程 {ctx.run.run_id}，步骤 {ctx.step.name}。",
+            f"你是 dm-rsi（DM-RSI-Framework 的 meta RSI）调度的一个判断步骤，流程 {ctx.ws.id}，步骤 {ctx.step.name}。",
             f"先读这个 sub-RSI 的说明：{skill}（以及它引用的 reference/ 文档）。",
             f"任务：{task}",
             f"只能往 {writes} 里写文件。不要修改 {skill.parent} 下的任何文件。",
@@ -85,7 +85,7 @@ def judge(ctx: StepContext, *, direction: str, task: str, writes: Path) -> Paylo
     )
     proc = subprocess.run(
         argv,
-        cwd=ctx.run.dir,
+        cwd=ctx.ws.dir,
         env={**os.environ, AGENT_ENV: "1"},
         capture_output=True,
         text=True,
@@ -124,12 +124,12 @@ def _record_usage(ctx: StepContext, direction: str, cost: float, res: dict[str, 
     usage = cast("dict[str, object]", res.get("usage") or {})
     entry = {
         "time": yamlfile.now(),
-        "run": ctx.run.run_id,
+        "run": ctx.ws.id,
         "step": ctx.step.name,
         "direction": direction,
         "cost_usd": cost,
         "input_tokens": usage.get("input_tokens"),
         "output_tokens": usage.get("output_tokens"),
     }
-    with (ctx.run.dir / "usage.jsonl").open("a", encoding="utf-8") as f:
+    with (ctx.ws.dir / "usage.jsonl").open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")

@@ -1,52 +1,60 @@
-"""xtra-rsi profile ``dm``：dm-rsi 的 meta loop（ADR 0001「Meta loop」，P3）。
+"""xtra-rsi profile ``dm``：dm-rsi 的 meta loop（ADR 0001，2026-11-23 修订）。
 
-``rsi run --profile dm --node root --iterations N --run-dir ...``
+``rsi run --profile dm --iterations N --run-dir ...``（``--node root`` 时 agent 花费记到节点预算）
 
-每一轮：
+分工：**观察、推理、决策是 dm-rsi 自己的；行动执行决策选中的那一段具体流程**（数据、训练、打分、对比、
+Decision Policy、final-test，见 :mod:`dm_rsi.flows`）。流程执行记在工作区（:mod:`dm_rsi.workspace`），
+执行过程（调了哪些 sub-RSI 命令、提交了哪些作业）作为行动阶段的 ``events`` 写进本轮的 ``action.yaml``，
+``rsi viz`` 面板上展开行动阶段就能看到。
 
-- observe：流程状态、待审批、submodule、issue 收件箱和已发出的 issue、上一轮的 lessons。
-- reasoning：把观察整理成 findings（步骤失败、等审批、等作业、submodule 落后或被写脏、新 issue……），
-  每条带证据和建议动作。
-- decision：从固定动作表里选**一件**事：``advance``（推进某个流程）、``new_run``（没有流程时按模板新建）、
-  ``draft_issue``（把归属某个方向的失败起草成 issue，进审批队列）、``wait``（只剩人要做的事）。
-- action：执行。对外的动作只会产生审批请求；动作不在动作表里时拒绝执行。
-- feedback：本轮推进了几步、新增了哪些审批、哪些流程完成及其 final-test 结果；没有可做的事时 ``stop: true``，
-  loop 停在审批点等人。
+- observe：工作区的产物、每次流程执行的状态、待审批、submodule、issue、上一轮的 lessons。
+- reasoning：findings。还没结束的执行 → 继续它或等人；失败的流程 → 归属方向、起草 issue；
+  否则按 :func:`dm_rsi.flows.suggest` 指出缺什么。
+- decision：``plan``，``action`` 是 ``flow``（带 ``flow``、``args``）、``resume``（带 ``step``）、
+  ``draft_issue`` 或 ``wait``。同一时间只有一段流程在执行。
+- action：执行 plan；``flow`` 的名字和参数在 :data:`dm_rsi.flows.ARGS` 之外的一律拒绝。
+- feedback：这段流程的结果、lessons；``wait`` 时 ``stop: true``，loop 停下等人。
 
-默认（``DMRSI_META=rules``）五个阶段都是确定性的规则实现。``DMRSI_META=llm`` 时 reasoning 和 decision
-换成 ``claude -p``（``CommandStage``，读 ``harness/<stage>/AGENTS.md``），action 仍然由代码执行并校验动作表。
+工作区：``DMRSI_WORKSPACE``（默认 ``main``），模板：``DMRSI_TEMPLATE``（默认 ``synthetic``，只在新建工作区时用）。
+默认（``DMRSI_META=rules``）五个阶段都是规则实现；``DMRSI_META=llm`` 时推理和决策换成 ``claude -p``
+（读 ``harness/<stage>/AGENTS.md``），行动仍由代码执行并校验。
 """
 
 from __future__ import annotations
 
 import json
 import os
+import time
 from typing import TYPE_CHECKING, cast
 
 from xtra_rsi import Profile, Stage, StageFn
 from xtra_rsi.command_stage import CommandStage
 
-from dm_rsi import config, issues, pipeline, submodules, templates
+from dm_rsi import backends as backends_mod
+from dm_rsi import config, flows, issues, steps, submodules, workspace
 from dm_rsi.approvals import ApprovalStore, State
 from dm_rsi.github import GhCli, GitHub, GitHubError
-from dm_rsi.pipeline_cli import make_backends
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from xtra_rsi import IterationRecord, StageContext
     from xtra_rsi.payload import Payload, Value
 
-ACTIONS = ("advance", "new_run", "draft_issue", "wait")
+_ = steps  # 导入即注册流程实现
 
-# 步骤种类 → 出问题时归哪个方向（issue 发给谁）
-OWNER = {
-    "dgen.rsi": "data",
-    "dgen.compare": "data",
-    "dpolicy.rsi": "decision-policy",
-    "elliptic.train": "training",
-    "elliptic.score": "training",
-    "elliptic.retrain": "training",
+ACTIONS = ("flow", "resume", "draft_issue", "wait")
+
+# 流程 → 出问题时归哪个方向（issue 发给谁）；None = dm-rsi 自己或环境的问题
+OWNER: dict[str, str | None] = {
+    "prepare_data": "training",
+    "train_base": "training",
+    "score_base": "training",
+    "data_rsi": "data",
+    "retrain": "training",
+    "data_compare": "data",
+    "dp_rsi": "decision-policy",
+    "final_test": None,
 }
 
 
@@ -58,53 +66,78 @@ def _gh() -> GitHub:
     return GhCli()
 
 
-def _usage_since(run: pipeline.Run, offset: int) -> tuple[list[Value], int]:
-    f = run.dir / "usage.jsonl"
-    if not f.is_file():
-        return [], offset
-    lines = f.read_text().splitlines()
-    new = [json.loads(line) for line in lines[offset:] if line.strip()]
-    return [{"cost_usd": float(e.get("cost_usd") or 0.0)} for e in new], len(lines)
+def _ws(cfg: config.Config) -> workspace.Workspace:
+    template = os.environ.get("DMRSI_TEMPLATE", "synthetic")
+    ws_id = os.environ.get("DMRSI_WORKSPACE", "main")
+    return workspace.open_or_create(cfg, ws_id, template, flows.template_params(template))
+
+
+def make_backends(cfg: config.Config) -> Mapping[str, backends_mod.Backend]:
+    """``dm-rsi.yaml`` 里配置的全部后端（构造时不连服务器）。"""
+    out: dict[str, backends_mod.Backend] = {}
+    for name, conf in cfg.backends.items():
+        try:
+            out[name] = backends_mod.make(name, conf, state_dir=cfg.home / "backends" / name)
+        except backends_mod.BackendError:
+            continue
+    return out
+
+
+def _carry(up: Payload) -> Payload:
+    return {
+        k: up[k] for k in ("lessons", "usage_offset", "workspace", "template", "pending") if k in up
+    }
 
 
 # ---- observe -------------------------------------------------------------------------------
 
 
+_KEEP = {"arms", "models", "compared", "model", "dp_model", "base_model", "rows_dir", "dp_headline"}
+_MAX_STR = 120
+_MAX_LIST = 8
+
+
+def _short(v: Value) -> Value:
+    if isinstance(v, str) and len(v) > _MAX_STR:
+        return v[: _MAX_STR - 3] + "..."
+    if isinstance(v, list) and len(v) > _MAX_LIST:
+        return [*v[:_MAX_LIST], f"...（共 {len(v)} 项）"]
+    return v
+
+
 def observe(ctx: StageContext) -> Payload:
     """收集当前状态。"""
     cfg = _cfg()
+    ws = _ws(cfg)
     store = ApprovalStore(cfg.approvals_dir)
-    runs: list[Value] = []
-    for r in pipeline.list_runs(cfg):
-        steps: list[Value] = []
-        for s in r.steps:
-            st = r.step_state(s.name)
-            steps.append(
-                {"name": s.name, "kind": s.kind, "state": st.get("state"), "note": st.get("note")}
-            )
-        runs.append(
+    approvals = {a.id: a for a in store.all()}
+    execs: list[Value] = []
+    for s in ws.steps:
+        st = ws.step_state(s.name)
+        aid = cast("Payload", st.get("data") or {}).get("approval")
+        a = approvals.get(str(aid)) if aid else None
+        execs.append(
             {
-                "run": r.run_id,
-                "template": r.template,
-                "finished": bool(r.state.get("finished")),
-                "steps": steps,
+                "step": s.name,
+                "flow": s.flow,
+                "state": st.get("state"),
+                "note": _short(cast("Value", st.get("note"))),
+                "approval": {"id": a.id, "state": a.state.value} if a else None,
             }
         )
+    pending = [a for a in approvals.values() if a.state is State.PENDING]
     out: Payload = {
-        "runs": runs,
-        "pending": [
-            {"id": a.id, "kind": a.kind.value, "title": a.title}
-            for a in store.all()
-            if a.state is State.PENDING
-        ],
+        "workspace": ws.id,
+        "template": ws.template,
+        # 决策规则要用的键原样保留，其余的截短（只给人和 LLM 看）
+        "artifacts": {k: v if k in _KEEP else _short(v) for k, v in ws.artifacts().items()},
+        "executions": execs,
+        "pending": [{"id": a.id, "kind": a.kind.value, "title": a.title} for a in pending],
         "submodules": [
             s.to_dict() for s in submodules.states(cfg, online=bool(os.environ.get("DMRSI_ONLINE")))
         ],
         "lessons": cast("Value", ctx.upstream.get("lessons") or []),
-        "usage_offsets": cast("Value", ctx.upstream.get("usage_offsets") or {}),
-        "template": cast(
-            "Value", ctx.upstream.get("template") or os.environ.get("DMRSI_TEMPLATE", "synthetic")
-        ),
+        "usage_offset": cast("Value", ctx.upstream.get("usage_offset") or 0),
     }
     try:
         gh = _gh()
@@ -123,50 +156,75 @@ def observe(ctx: StageContext) -> Payload:
 # ---- reasoning -----------------------------------------------------------------------------
 
 
-def reasoning(ctx: StageContext) -> Payload:  # noqa: C901 -- 逐类 finding 平铺，和 AGENTS.local.md 的表一一对应
-    """把观察整理成 findings，每条带建议动作。"""
+def _finding(kind: str, e: Payload, suggest: str, **extra: Value) -> Payload:
+    return {
+        "kind": kind,
+        "step": e["step"],
+        "flow": e["flow"],
+        "evidence": e.get("note"),
+        "suggest": suggest,
+        **extra,
+    }
+
+
+def _open_findings(execs: list[Payload]) -> list[Value]:
+    out: list[Value] = []
+    for e in execs:
+        state = e.get("state")
+        if state in ("pending", "running"):
+            out.append(_finding("open_execution", e, "resume"))
+        elif state == "blocked":
+            a = cast("Payload | None", e.get("approval"))
+            if a is not None and a.get("state") == "pending":
+                out.append(_finding("waiting_human", e, "wait"))
+            else:
+                # 审批已经有结果：继续推进，让流程自己处理批准 / 拒绝
+                out.append(_finding("open_execution", e, "resume"))
+    return out
+
+
+def reasoning(ctx: StageContext) -> Payload:
+    """整理 findings，每条带建议动作。"""
     up = ctx.upstream
-    findings: list[Value] = []
-    for r in cast("list[Payload]", up.get("runs") or []):
-        if r.get("finished"):
-            continue
-        for s in cast("list[Payload]", r.get("steps") or []):
-            state = s.get("state")
-            if state == "failed":
-                owner = OWNER.get(str(s.get("kind")))
-                findings.append(
-                    {
-                        "kind": "step_failed",
-                        "run": r["run"],
-                        "step": s["name"],
-                        "owner": owner,
-                        "evidence": s.get("note"),
-                        "suggest": "draft_issue" if owner else "wait",
-                    }
-                )
-                break
-            if state == "blocked":
-                findings.append(
-                    {
-                        "kind": "waiting_human",
-                        "run": r["run"],
-                        "step": s["name"],
-                        "evidence": s.get("note"),
-                        "suggest": "wait",
-                    }
-                )
-                break
-            if state in ("running", "pending"):
-                findings.append(
-                    {
-                        "kind": "runnable",
-                        "run": r["run"],
-                        "step": s["name"],
-                        "evidence": s.get("note"),
-                        "suggest": "advance",
-                    }
-                )
-                break
+    execs = cast("list[Payload]", up.get("executions") or [])
+    findings = _open_findings(execs)
+    latest: dict[str, Payload] = {}
+    for e in execs:
+        latest[str(e["flow"])] = e
+    failed = [e for e in latest.values() if e.get("state") == "failed"]
+    for e in failed:
+        owner = OWNER.get(str(e["flow"]))
+        findings.append(_finding("flow_failed", e, "draft_issue" if owner else "wait", owner=owner))
+    nxt = flows.suggest(cast("Payload", up.get("artifacts") or {}))
+    if nxt is not None:
+        flow, args, why = nxt
+        if flow in {str(e["flow"]) for e in failed}:
+            findings.append(
+                {
+                    "kind": "blocked_by_failure",
+                    "flow": flow,
+                    "evidence": f"下一段应该是 {flow}（{why}），但它上次失败了，等人处理（dm-rsi work reset）",
+                    "suggest": "wait",
+                }
+            )
+        else:
+            findings.append(
+                {
+                    "kind": "next_flow",
+                    "flow": flow,
+                    "args": args,
+                    "evidence": why,
+                    "suggest": "flow",
+                }
+            )
+    elif not any(e.get("state") in ("pending", "running", "blocked") for e in execs):
+        findings.append(
+            {
+                "kind": "finished",
+                "evidence": "工作区的流程都完成了（含 final-test）",
+                "suggest": "wait",
+            }
+        )
     for sm in cast("list[Payload]", up.get("submodules") or []):
         if sm.get("dirty"):
             findings.append(
@@ -178,11 +236,12 @@ def reasoning(ctx: StageContext) -> Payload:  # noqa: C901 -- 逐类 finding 平
                 }
             )
         if sm.get("behind"):
+            evidence = f"{sm['pinned']} → {sm['upstream']}"
             findings.append(
                 {
                     "kind": "submodule_behind",
                     "path": sm["path"],
-                    "evidence": f"{sm['pinned']} → {sm['upstream']}",
+                    "evidence": evidence,
                     "suggest": "wait",
                 }
             )
@@ -194,148 +253,167 @@ def reasoning(ctx: StageContext) -> Payload:  # noqa: C901 -- 逐类 finding 平
         }
         for i in cast("list[Payload]", up.get("inbox") or [])
     )
-    active = [r for r in cast("list[Payload]", up.get("runs") or []) if not r.get("finished")]
-    if not active:
-        findings.append(
-            {
-                "kind": "no_active_run",
-                "suggest": "new_run",
-                "evidence": f"没有进行中的流程，模板 {up.get('template')}",
-            }
-        )
     return {**_carry(up), "findings": findings}
-
-
-def _carry(up: Payload) -> Payload:
-    return {k: up[k] for k in ("lessons", "usage_offsets", "template", "pending") if k in up}
 
 
 # ---- decision ------------------------------------------------------------------------------
 
-_PRIORITY = {"advance": 0, "draft_issue": 1, "new_run": 2, "wait": 9}
+
+def _issue_key(f: Payload) -> str:
+    return f"issue:{f.get('step')}"
 
 
 def decision(ctx: StageContext) -> Payload:
-    """选一件事。优先推进流程，其次把失败转成 issue，再其次新建流程；都没有就等人。"""
+    """选一件事：先把进行中的流程推进完（同一时间只执行一段），再处理失败，再开始下一段流程。"""
     up = ctx.upstream
     findings = cast("list[Payload]", up.get("findings") or [])
-    lessons = [str(x) for x in cast("list[Value]", up.get("lessons") or [])]
-    candidates = [
-        f for f in findings if f.get("suggest") in _PRIORITY and f.get("suggest") != "wait"
+    lessons = {str(x) for x in cast("list[Value]", up.get("lessons") or [])}
+    by_kind: dict[str, list[Payload]] = {}
+    for f in findings:
+        by_kind.setdefault(str(f.get("kind")), []).append(f)
+    fails = [
+        f for f in by_kind.get("flow_failed", []) if f.get("owner") and _issue_key(f) not in lessons
     ]
-    # 同一个失败已经起草过 issue（lessons 里记了）就不再起草
-    candidates = [
-        f
-        for f in candidates
-        if not (f.get("suggest") == "draft_issue" and _issue_key(f) in lessons)
-    ]
-    candidates.sort(key=lambda f: _PRIORITY[str(f["suggest"])])
-    if not candidates:
-        plan: Payload = {"action": "wait", "why": "只剩需要人做的事（审批、抽检）或没有可做的事"}
+    plan: Payload
+    if by_kind.get("open_execution"):
+        f = by_kind["open_execution"][0]
+        plan = {
+            "action": "resume",
+            "step": f["step"],
+            "why": f"继续 {f['step']}：{f.get('evidence')}",
+        }
+    elif by_kind.get("waiting_human"):
+        f = by_kind["waiting_human"][0]
+        plan = {"action": "wait", "why": f"{f['step']} 等人：{f.get('evidence')}"}
+    elif fails:
+        f = fails[0]
+        plan = {
+            "action": "draft_issue",
+            "finding": f,
+            "why": f"{f['flow']} 失败，归 {f['owner']}：{f.get('evidence')}",
+        }
+    elif by_kind.get("next_flow"):
+        f = by_kind["next_flow"][0]
+        plan = {
+            "action": "flow",
+            "flow": f["flow"],
+            "args": f.get("args") or {},
+            "why": f.get("evidence"),
+        }
     else:
-        f = candidates[0]
-        plan = {"action": f["suggest"], "finding": f, "why": f"{f['kind']}：{f.get('evidence')}"}
-    rejected = [{"finding": f.get("kind"), "action": f.get("suggest")} for f in candidates[1:]]
-    return {**_carry(up), "plan": plan, "rejected": cast("Value", rejected)}
-
-
-def _issue_key(f: Payload) -> str:
-    return f"issue:{f.get('run')}/{f.get('step')}"
+        kinds = ("finished", "blocked_by_failure", "flow_failed")
+        reasons = [str(f.get("evidence")) for f in findings if f.get("kind") in kinds]
+        plan = {"action": "wait", "why": "；".join(reasons) or "没有可做的事"}
+    return {**_carry(up), "plan": plan}
 
 
 # ---- action --------------------------------------------------------------------------------
 
 
+def _usage_since(ws: workspace.Workspace, offset: int) -> tuple[list[Value], int]:
+    f = ws.dir / "usage.jsonl"
+    if not f.is_file():
+        return [], offset
+    lines = f.read_text().splitlines()
+    new = [json.loads(line) for line in lines[offset:] if line.strip()]
+    return [{"cost_usd": float(e.get("cost_usd") or 0.0)} for e in new], len(lines)
+
+
+def _run_flow(plan: Payload, up: Payload, out: Payload) -> Payload:
+    cfg = _cfg()
+    ws = _ws(cfg)
+    if plan.get("action") == "flow":
+        try:
+            kind, params = flows.resolve(
+                ws.template, str(plan.get("flow")), cast("Payload", plan.get("args") or {})
+            )
+        except flows.FlowError as e:
+            return {**out, "result": {"error": str(e)}}
+        if ws.open_steps():
+            msg = f"还有没结束的执行 {[s.name for s in ws.open_steps()]}，同一时间只执行一段流程"
+            return {**out, "result": {"error": msg}}
+        name = ws.add(str(plan["flow"]), kind, params).name
+    else:
+        name = str(plan.get("step"))
+        if ws.step_state(name).get("state") == "running":
+            time.sleep(float(os.environ.get("DMRSI_POLL_S", "300")))  # 等后台作业，不空转
+    res = ws.run_step(name, ApprovalStore(cfg.approvals_dir), make_backends(cfg))
+    usage, offset = _usage_since(ws, int(cast("int", up.get("usage_offset") or 0)))
+    out = {**out, "result": res, "events": res.get("events") or [], "usage_offset": offset}
+    if usage:
+        out["_usage"] = usage
+    return out
+
+
 def action(ctx: StageContext) -> Payload:
-    """执行 decision 选的动作（只允许动作表里的）。"""
+    """执行 plan。行动 = 执行一段具体流程（或起草 issue / 等待）。"""
     up = ctx.upstream
     plan = cast("Payload", up.get("plan") or {})
     act = str(plan.get("action"))
-    if act not in ACTIONS:
-        return {
-            **_carry(up),
-            "result": {"error": f"动作 {act!r} 不在动作表 {ACTIONS} 里，拒绝执行"},
-        }
-    cfg = _cfg()
-    store = ApprovalStore(cfg.approvals_dir)
-    finding = cast("Payload", plan.get("finding") or {})
-    offsets = dict(cast("dict[str, int]", up.get("usage_offsets") or {}))
     out: Payload = {**_carry(up), "action": act}
-    if act == "advance":
-        run = pipeline.load(cfg, str(finding["run"]))
-        res = run.advance(store, make_backends(cfg))
-        usage, offsets[run.run_id] = _usage_since(run, offsets.get(run.run_id, 0))
-        out["result"] = res
-        if usage:
-            out["_usage"] = usage
-    elif act == "new_run":
-        name = str(up.get("template") or "synthetic")
-        steps, params = templates.TEMPLATES[name]()
-        run_id = f"{name[:4]}-meta-{ctx.iteration:03d}-{os.getpid()}"
-        pipeline.create(cfg, run_id, name, steps, params)
-        out["result"] = {"created": run_id}
-    elif act == "draft_issue":
-        owner = str(finding.get("owner"))
+    if act not in ACTIONS:
+        return {**out, "result": {"error": f"动作 {act!r} 不在动作表 {ACTIONS} 里，拒绝执行"}}
+    if act in ("flow", "resume"):
+        return _run_flow(plan, up, out)
+    if act == "draft_issue":
+        cfg = _cfg()
+        ws = _ws(cfg)
+        f = cast("Payload", plan.get("finding") or {})
         res = issues.draft(
             cfg,
             _gh(),
-            store,
-            direction=owner,
-            key=f"{finding.get('run')}/{finding.get('step')}",
-            title=f"dm-rsi 流程 {finding.get('run')} 的 {finding.get('step')} 步骤失败",
-            body=f"dm-rsi 在调度流程时，`{finding.get('step')}` 步骤失败：\n\n```\n{finding.get('evidence')}\n```",
-            evidence=[f"$DMRSI_HOME/runs/{finding.get('run')}/{finding.get('step')}/"],
+            ApprovalStore(cfg.approvals_dir),
+            direction=str(f.get("owner")),
+            key=f"{ws.id}/{f.get('step')}",
+            title=f"dm-rsi 执行 {f.get('flow')} 时失败（工作区 {ws.id}，{f.get('step')}）",
+            body=f"dm-rsi 在执行流程 `{f.get('flow')}` 时失败：\n\n```\n{f.get('evidence')}\n```",
+            evidence=[f"$DMRSI_HOME/work/{ws.id}/{f.get('step')}/"],
         )
-        out["result"] = (
+        result: Payload = (
             {"existing": res.existing.url}
             if res.existing
             else {"approval": res.approval.id if res.approval else None}
         )
-        out["issue_key"] = _issue_key(finding)
-    else:
-        out["result"] = {
-            "waiting": [
-                f"{p['id']} {p['title']}" for p in cast("list[Payload]", up.get("pending") or [])
-            ]
-        }
-    out["usage_offsets"] = cast("Value", offsets)
-    return out
+        return {**out, "result": result, "issue_key": _issue_key(f)}
+    waiting = [f"{p['id']} {p['title']}" for p in cast("list[Payload]", up.get("pending") or [])]
+    return {**out, "result": {"why": plan.get("why"), "waiting": cast("Value", waiting)}}
 
 
 # ---- feedback ------------------------------------------------------------------------------
 
 
 def feedback(ctx: StageContext) -> Payload:
-    """评估本轮效果，记下 lessons；没有可做的事时停下等人。"""
+    """评估本轮，记下 lessons；``wait`` 时停下等人。"""
     up = ctx.upstream
     act = str(up.get("action"))
     res = cast("Payload", up.get("result") or {})
     lessons = [str(x) for x in cast("list[Value]", up.get("lessons") or [])]
     if isinstance(up.get("issue_key"), str):
         lessons.append(str(up["issue_key"]))
-    moved = len(cast("list[Value]", res.get("moved") or [])) if act == "advance" else 0
-    progress = moved > 0 or act in ("new_run", "draft_issue")
-    stop = act == "wait" or (
-        act == "advance" and not moved and res.get("state") in ("blocked", "failed")
-    )
-    verdict = "progress" if progress else ("blocked" if stop else "no_change")
+    if act == "wait":
+        verdict = "waiting"
+    elif "error" in res:
+        verdict = "refused"
+    elif act in ("flow", "resume"):
+        verdict = str(res.get("state"))
+    else:
+        verdict = "issue_drafted"
     return {
         "lessons": cast("Value", lessons[-50:]),
-        "usage_offsets": up.get("usage_offsets") or {},
-        "template": up.get("template"),
+        "usage_offset": up.get("usage_offset") or 0,
         "verdict": verdict,
-        "moved": moved,
+        "flows_done": 1 if res.get("state") == "done" else 0,
         "last": cast("Value", {"action": act, "result": res}),
-        "stop": stop,
-        "reason": "等人：审批或人工步骤" if stop else None,
+        "stop": act == "wait",
+        "reason": str(res.get("why")) if act == "wait" else None,
     }
 
 
 # ---- profile -------------------------------------------------------------------------------
 
 
-def _progress(records: Sequence[IterationRecord]) -> float:
-    return float(sum(int(cast("int", r.last.get("moved") or 0)) for r in records))
+def _flows_done(records: Sequence[IterationRecord]) -> float:
+    return float(sum(int(cast("int", r.last.get("flows_done") or 0)) for r in records))
 
 
 def profile() -> Profile:
@@ -358,10 +436,10 @@ def profile() -> Profile:
     return Profile(
         name="dm",
         stages=stages,
-        seed={"template": os.environ.get("DMRSI_TEMPLATE", "synthetic")},
-        metrics={"steps_moved": _progress},
+        seed={},
+        metrics={"flows_done": _flows_done},
         goal={
-            "target": "DM-RSI 端到端流程",
-            "metric": "推进的步骤数；完成的流程在 val 上的 f1_e2e",
+            "target": f"DM-RSI 端到端流程（工作区 {os.environ.get('DMRSI_WORKSPACE', 'main')}）",
+            "metric": "完成的流程段数；完成后看 val / test 上的 f1_e2e",
         },
     )

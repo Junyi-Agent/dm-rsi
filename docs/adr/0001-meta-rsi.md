@@ -31,7 +31,7 @@ DM-RSI-Framework 按方向拆成多个 sub-RSI：Data（Bingqiao，`dgen`）、T
 - 步骤：`build-data → data-rsi → train → merge → score → data-compare → dp-rsi → final-test`。
 - 契约沿用 sub-RSI 已有的：`<name>_{pool,val,test}.parquet`（`id, y, p`，可选 `step, post43`）、`dgen build` 的 `train.jsonl` + `build_report.json`、`dpolicy` 的 `incumbent.yaml`。dm-rsi 在步骤结束时校验契约。
 - 步骤分两种：机械步骤直接调 sub-RSI 的 CLI；判断步骤（写诊断、配方、提案）在对应 submodule 目录里起 agent 会话，提示词是该 sub-RSI 的 SKILL.md 加本步骤的目标和限制。
-- 流程状态写 `$DMRSI_HOME/runs/<run>/state.yaml`。所有数据、权重、分数、run 产物放 `$DMRSI_HOME`，不进 git。
+- （已修订，见下文「修订」：改为工作区 `$DMRSI_HOME/work/<id>/`）流程状态写 `$DMRSI_HOME/runs/<run>/state.yaml`。所有数据、权重、分数、run 产物放 `$DMRSI_HOME`，不进 git。
 
 ### 执行后端可插拔
 
@@ -79,6 +79,16 @@ DM-RSI-Framework 按方向拆成多个 sub-RSI：Data（Bingqiao，`dgen`）、T
 
 - dgen 的合成数据 val 只有 1 个 step，dpolicy 默认 `by: step` 协议需要多个 step；合成模板改用 `by: group`。
 - Decision Policy 的流程用 `addr_txhist_noul` 行、在全部 train 上训练；Data RSI Stage 1 用 `addr_json_noul` 行、在 `train_sub40k` 上训练，pool = 训练期里其余的行。`elliptic` 模板按 Data 的做法从 train 里切 `train_sub` + `pool`，schema 默认 `elliptic_addr.yaml`，是否适用于 txhist 行要 `dgen check` 在真实数据上确认。
+
+### 修订（2026-11-23）：流程放进「行动」阶段
+
+用户确认的分工：**观察、推理、决策是 dm-rsi 自己的；行动执行具体的流程**（数据、训练、打分……）。原设计里流程是一个和 meta loop 平级的独立对象（按模板生成固定步骤列表，`dm-rsi run advance` 可以绕过 loop 直接推进），面板上也看不到。改为：
+
+- **工作区**（`$DMRSI_HOME/work/<id>/`）代替「流程 run」：只记录行动阶段执行过的流程段和产物，不再有固定的步骤列表。流程段之间不声明依赖，要什么产物就在工作区里找最新完成的那一份。
+- **决策选下一段流程**（`dm_rsi.flows` 的动作表：`prepare_data / train_base / score_base / data_rsi / retrain / data_compare / dp_rsi / final_test`，带参数），另有 `resume`（继续没结束的执行）、`draft_issue`、`wait`。默认规则按产物判断缺什么、什么过时；LLM 决策可以不按默认顺序（重跑、换配方、多跑几轮），但流程名和参数只能取动作表里的。同一时间只执行一段流程。
+- **行动执行这段流程**，执行过程（调用的 sub-RSI 命令、日志、作业）写进本轮的 `action.yaml` 的 `events`，viz 插件把它作为行动阶段的内部过程显示。
+- 去掉 `dm-rsi run new/advance`：流程只经由 meta loop 执行。`dm-rsi work list/show/reset` 只用来查看和重置失败的执行。
+- 同一模型重复执行 `dp_rsi` 是在同一个 dpolicy run 上多跑几轮；对比选出的模型变了才开新的 dpolicy run。
 
 ## 后果
 

@@ -20,7 +20,7 @@ from dm_rsi import agent
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 DEFAULT_RECIPES = ("hard_all.yaml", "smote_baseline.yaml")
 DEFAULT_PROPOSALS = ("example_abstain_second_stage.yaml", "example_rolling_platt.yaml")

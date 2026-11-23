@@ -9,14 +9,14 @@ from typing import TYPE_CHECKING
 
 from xtra_rsi.yamlio import dump
 
-from dm_rsi import __version__, config, issues, submodules
+from dm_rsi import __version__, config, issues, submodules, workspace
 from dm_rsi.approvals import ApprovalError, ApprovalStore, Kind, State
 from dm_rsi.github import GhCli, GitHub, GitHubError
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-    from xtra_rsi.payload import Payload
+    from xtra_rsi.payload import Payload, Value
 
 type Handler = Callable[[argparse.Namespace, config.Config, GitHub], int]
 
@@ -31,15 +31,13 @@ def _err(msg: str) -> None:
 
 def cmd_status(args: argparse.Namespace, cfg: config.Config, gh: GitHub) -> int:
     """总览：submodule、待审批、收件箱、流程 run。"""
-    from dm_rsi import pipeline  # noqa: PLC0415 -- 避免 P0 命令依赖流程模块的导入开销
-
     store = ApprovalStore(cfg.approvals_dir)
     out: Payload = {
         "version": __version__,
         "home": str(cfg.home),
         "submodules": [s.to_dict() for s in submodules.states(cfg, online=not args.offline)],
         "pending": [f"{a.id} {a.kind} {a.title}" for a in store.all() if a.state is State.PENDING],
-        "runs": [r.summary() for r in pipeline.list_runs(cfg)],
+        "workspaces": [w.summary() for w in workspace.list_workspaces(cfg)],
     }
     if not args.offline:
         try:
@@ -140,10 +138,40 @@ def cmd_issue_list(_args: argparse.Namespace, cfg: config.Config, gh: GitHub) ->
     return 0
 
 
+def cmd_work_list(_args: argparse.Namespace, cfg: config.Config, _gh: GitHub) -> int:
+    """全部工作区。"""
+    _emit({"workspaces": [w.summary() for w in workspace.list_workspaces(cfg)]})
+    return 0
+
+
+def cmd_work_show(args: argparse.Namespace, cfg: config.Config, _gh: GitHub) -> int:
+    """一个工作区的流程执行。"""
+    ws = workspace.load(cfg, args.id)
+    rows: list[Value] = []
+    for s in ws.steps:
+        st = ws.step_state(s.name)
+        row: Payload = {
+            "step": s.name,
+            "kind": s.kind,
+            "state": st.get("state"),
+            "note": st.get("note"),
+        }
+        if args.outputs:
+            row["outputs"] = st.get("outputs")
+        rows.append(row)
+    _emit({"workspace": ws.id, "template": ws.template, "dir": str(ws.dir), "executions": rows})
+    return 0
+
+
+def cmd_work_reset(args: argparse.Namespace, cfg: config.Config, _gh: GitHub) -> int:
+    """重置一次执行。"""
+    workspace.load(cfg, args.id).reset(args.step)
+    _emit({"reset": args.step, "note": "meta loop 下一轮会重新推进它（rsi run --profile dm ...）"})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     """命令行结构。"""
-    from dm_rsi import pipeline_cli  # noqa: PLC0415 -- 流程子命令在单独模块里注册
-
     p = argparse.ArgumentParser(
         prog="dm-rsi", description="DM-RSI meta RSI：统一入口，调度各方向的 sub-RSI"
     )
@@ -179,7 +207,17 @@ def build_parser() -> argparse.ArgumentParser:
     d.set_defaults(func=cmd_issue_draft)
     isub.add_parser("list", help="收件箱和已发出的 issue").set_defaults(func=cmd_issue_list)
 
-    pipeline_cli.register(sub)
+    w = sub.add_parser("work", help="工作区：行动阶段执行过的流程（只读查看，或重置失败的执行）")
+    wsub = w.add_subparsers(dest="work_cmd", required=True)
+    wsub.add_parser("list", help="全部工作区").set_defaults(func=cmd_work_list)
+    ws_ = wsub.add_parser("show", help="一个工作区的每次流程执行和产物")
+    ws_.add_argument("id")
+    ws_.add_argument("--outputs", action="store_true", help="同时列出每次执行的产物")
+    ws_.set_defaults(func=cmd_work_show)
+    wr = wsub.add_parser("reset", help="把失败的执行重置为 pending，meta loop 下一轮会重新推进它")
+    wr.add_argument("id")
+    wr.add_argument("step")
+    wr.set_defaults(func=cmd_work_reset)
     return p
 
 
@@ -190,6 +228,6 @@ def main(argv: Sequence[str] | None = None, *, gh: GitHub | None = None) -> int:
         cfg = config.load(home=args.home)
         handler: Handler = args.func
         return handler(args, cfg, gh or GhCli())
-    except (config.ConfigError, ApprovalError, GitHubError) as e:
+    except (config.ConfigError, ApprovalError, GitHubError, workspace.WorkspaceError) as e:
         _err(str(e))
         return 1

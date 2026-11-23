@@ -42,7 +42,6 @@ EOF
 准备好之后：
 
 ```bash
-uv run dm-rsi run new --template elliptic --id ell-1
-uv run dm-rsi run advance ell-1     # 建数据 → 停在第一次训练的审批
-uv run dm-rsi pending
+DMRSI_TEMPLATE=elliptic DMRSI_WORKSPACE=ell-1 uv run rsi run --profile dm --iterations 20 --run-dir $DMRSI_HOME/loops/ell-1
+uv run dm-rsi pending      # 建完数据后停在第一次训练的审批
 ```

@@ -27,14 +27,15 @@ from dm_rsi.approvals import Kind, State
 from dm_rsi.backends import requires_approval
 from dm_rsi.backends.base import JobRef, JobSpec, JobState
 from dm_rsi.backends.local import LocalBackend
-from dm_rsi.pipeline import Outcome, PipelineError, StepState, step_kind
 from dm_rsi.steps.contracts import check_scores
+from dm_rsi.steps.synthetic import arms_to_train  # 两种模板共用同一个选择规则
+from dm_rsi.workspace import Outcome, StepState, WorkspaceError, step_kind
 
 if TYPE_CHECKING:
     from xtra_rsi.payload import Payload, Value
 
     from dm_rsi.config import Config
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 ROWS_SUBDIR = "data/onejev/addr_txhist_noul"
 SCORE_SPLITS = ("pool", "val", "test")
@@ -81,7 +82,7 @@ def _run_local(
     if proc.returncode != 0:
         tail = "\n".join(proc.stderr.strip().splitlines()[-15:])
         msg = f"{name} 失败（{proc.returncode}），日志 {ctx.log_dir}/{name}.err：\n{tail}"
-        raise PipelineError(msg)
+        raise WorkspaceError(msg)
     return proc.stdout
 
 
@@ -121,7 +122,7 @@ def build_data(ctx: StepContext) -> Outcome:
     if not sub.is_file() or not (rows / "pool.jsonl").is_file():
         argv = [str(p["JEV_PYTHON"]), "-c", _SPLIT_POOL, str(rows), str(n), "0"]
         _run_local(ctx, "split-pool", argv, cwd=ctx.dir, env=env)
-    features = ctx.run.dir / "features.parquet"
+    features = ctx.ws.dir / "features.parquet"
     if not features.is_file():
         feat = str(_pipeline_script(ctx.cfg, "04_policy_features.py"))
         _run_local(
@@ -172,7 +173,7 @@ def machine_yaml(ctx: StepContext) -> Path:
 
 def _exp_yaml(ctx: StepContext, model: str, train: str) -> tuple[Path, str]:
     p = paths(ctx.cfg)
-    name = f"{ctx.run.run_id}-{model}".lower()
+    name = f"{ctx.ws.id}-{model}".lower()
     path = p["OJH_HOME"] / "work" / name / "exp.yaml"
     if not path.is_file():
         yamlfile.write(
@@ -225,7 +226,7 @@ def train_model(ctx: StepContext, model: str, train: str) -> tuple[StepState, st
         },
         explain=(
             f"要在后端 {ctx.param('gpu_backend', 'xtrah200')} 上训练模型 {model}"
-            f"（流程 {ctx.run.run_id}，elephant-1 LoRA，{gpus} 张卡，按以往约 2.4 GPU 小时）。\n"
+            f"（流程 {ctx.ws.id}，elephant-1 LoRA，{gpus} 张卡，按以往约 2.4 GPU 小时）。\n"
             f"训练数据：{train}\n实验配置：{exp}\n"
             "为什么问你：训练占共享 GPU 时间，ADR 0001 规定每次训练都要人确认。\n"
             "批准：dm-rsi 提交作业，训练结束后自动合并 LoRA、打分，流程继续。\n"
@@ -258,7 +259,7 @@ def train_model(ctx: StepContext, model: str, train: str) -> tuple[StepState, st
         backend = ctx.backend(str(ctx.param("gpu_backend", "xtrah200")))
         job = backend.submit(
             JobSpec(
-                name=f"{ctx.run.run_id}-train-{model}",
+                name=f"{ctx.ws.id}-train-{model}",
                 argv=[_ojh_python(ctx), "-m", "harness.runner", lock],
                 cwd=p["OJH_REPO"],
                 log_dir=ctx.log_dir,
@@ -303,7 +304,7 @@ def _merged(run_dir: str) -> Path | None:
 def score_model(ctx: StepContext, model: str, run_dir: str) -> tuple[StepState, str]:  # noqa: PLR0911 -- 每个出口对应一个流程状态
     """合并 LoRA（本机 CPU）→ GPU 作业里核对合并结果并给 pool / val / test 打分。"""
     p = paths(ctx.cfg)
-    scores = ctx.run.dir / "scores"
+    scores = ctx.ws.dir / "scores"
     if all((scores / f"{model}_{s}.parquet").is_file() for s in SCORE_SPLITS):
         check_scores(ctx.cfg, scores, model, list(SCORE_SPLITS))
         return StepState.DONE, f"{model} 已打分"
@@ -350,7 +351,7 @@ def score_model(ctx: StepContext, model: str, run_dir: str) -> tuple[StepState, 
                 ctx.store.mark(a.id, ok=True, result={"backend": backend.name})
         job = backend.submit(
             JobSpec(
-                name=f"{ctx.run.run_id}-score-{model}",
+                name=f"{ctx.ws.id}-score-{model}",
                 argv=["bash", str(script), run_dir, str(merged), model],
                 cwd=p["DMRSI_REPO"],
                 log_dir=ctx.log_dir,
@@ -395,7 +396,7 @@ def score(ctx: StepContext) -> Outcome:
         StepState.DONE,
         note,
         outputs={
-            "scores_dir": str(ctx.run.dir / "scores"),
+            "scores_dir": str(ctx.ws.dir / "scores"),
             "base_model": model,
             "models": {"base": model},
         },
@@ -405,8 +406,8 @@ def score(ctx: StepContext) -> Outcome:
 @step_kind("elliptic.retrain")
 def retrain(ctx: StepContext) -> Outcome:
     """对 Data RSI 的每个训练文件：训练（要审批）+ 打分。一个一个来，同一时间只占一组卡。"""
-    arms = cast("list[Payload]", ctx.find_output("arms"))
-    models: dict[str, Value] = {"base": str(ctx.find_output("base_model"))}
+    arms = arms_to_train(ctx)
+    models: dict[str, Value] = dict(cast("dict[str, Value]", ctx.find_output("models")))
     for arm in arms:
         h = str(arm["hash"])
         name = f"A{h[:8]}"
@@ -420,5 +421,5 @@ def retrain(ctx: StepContext) -> Outcome:
     return Outcome(
         StepState.DONE,
         f"重训并打分 {len(arms)} 组",
-        outputs={"scores_dir": str(ctx.run.dir / "scores"), "models": models},
+        outputs={"scores_dir": str(ctx.ws.dir / "scores"), "models": models},
     )

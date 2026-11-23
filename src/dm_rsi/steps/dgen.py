@@ -13,15 +13,15 @@ from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv, yamlfile
 from dm_rsi.approvals import Kind, State
-from dm_rsi.pipeline import Outcome, StepState, step_kind
 from dm_rsi.steps import judge
+from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from xtra_rsi.payload import Payload, Value
 
-    from dm_rsi.pipeline import StepContext
+    from dm_rsi.workspace import StepContext
 
 DEFAULTS: Payload = {
     "diagnosis": {"threshold": "max_f1", "kmax": 6, "min_sil": 0.1, "n_ok": 2000, "seed": 0},
@@ -56,7 +56,7 @@ def _dgen(ctx: StepContext, name: str, *args: str, ok: tuple[int, ...] = (0,)) -
 
 def config_path(ctx: StepContext) -> Path:
     """本流程 Data RSI 的运行配置（data-rsi 步骤写，compare / final-test 读）。"""
-    return ctx.run.dir / "data-rsi" / "dgen.yaml"
+    return ctx.ws.dir / "data-rsi" / "dgen.yaml"
 
 
 def write_config(ctx: StepContext) -> Path:
@@ -66,8 +66,8 @@ def write_config(ctx: StepContext) -> Path:
         return path
     overrides = cast("Payload", ctx.param("dgen", {}) or {})
     cfg: Payload = {
-        "run_name": ctx.run.run_id,
-        "out_dir": str(ctx.run.dir / "data-rsi" / "out"),
+        "run_name": ctx.ws.id,
+        "out_dir": str(ctx.ws.dir / "data-rsi" / "out"),
         "schema": str(ctx.find_output("schema")),
         "data": {
             "train": str(ctx.find_output("train")),
@@ -104,7 +104,7 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: C901 -- 按 SKILL 主流程逐步
     """运行 Data RSI 主流程，到 build 为止。"""
     subenv.ensure_env(ctx.cfg)
     conf = write_config(ctx)
-    out = ctx.run.dir / "data-rsi" / "out"
+    out = ctx.ws.dir / "data-rsi" / "out"
 
     # 1. check：有 errors 时 dgen 退出码 1
     check = json.loads(_dgen(ctx, "check", "check", str(conf), ok=(0, 1)))
@@ -117,9 +117,12 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: C901 -- 按 SKILL 主流程逐步
         _dgen(ctx, "diagnose", "diagnose", str(conf))
 
     # 3–4. 写配方（judge）
+    # new_recipes: 决策要求再写一批（例如上一批都没通过对比）；每次执行只写一次
     recipes = out / "recipes"
-    if not recipes.is_dir() or not any(recipes.glob("*.yaml")):
+    wants_new = bool(ctx.param("new_recipes", False)) and not ctx.data.get("recipes_written")
+    if not recipes.is_dir() or not any(recipes.glob("*.yaml")) or wants_new:
         judge.write_recipes(ctx, recipes, diagnosis)
+        ctx.data["recipes_written"] = True
 
     # 5. generate：内容相同的配方只生成一次，所以重复调用安全
     _dgen(ctx, "generate", "generate", str(conf))
@@ -139,7 +142,7 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: C901 -- 按 SKILL 主流程逐步
                 "how": "在每个 spotcheck.csv 的 verdict 列填 ok/wrong_label/unrealistic/duplicate，ok ≥ 90% 算通过",
             },
             explain=(
-                f"Data RSI 生成了 {len(arms)} 组新训练数据（流程 {ctx.run.run_id}），进训练之前要人抽检。\n"
+                f"Data RSI 生成了 {len(arms)} 组新训练数据（流程 {ctx.ws.id}），进训练之前要人抽检。\n"
                 "要你做的：打开下面每个 spotcheck.csv，在 verdict 列填 ok / wrong_label / unrealistic / duplicate"
                 "（每份约 50 行），ok ≥ 90% 算通过。\n"
                 + "\n".join(f"  {s}" for s in sheets)
@@ -196,8 +199,9 @@ def compare(ctx: StepContext) -> Outcome:
     conf = config_path(ctx)
     models = cast("dict[str, str]", ctx.find_output("models"))
     base_key = "base"
-    tag = str(ctx.param("tag", "dmrsi"))
-    res_path = ctx.run.dir / "data-rsi" / "out" / "compare" / tag / "compare.json"
+    # dgen 拒绝覆盖已有的对比；每次执行用自己的 tag
+    tag = str(ctx.param("tag", f"dmrsi-{ctx.step.name}"))
+    res_path = ctx.ws.dir / "data-rsi" / "out" / "compare" / tag / "compare.json"
     if not res_path.is_file():
         runs = ",".join(f"{k}={v}" for k, v in models.items())
         _dgen(
@@ -236,6 +240,7 @@ def compare(ctx: StepContext) -> Outcome:
             "model_key": winner_key,
             "compare": str(res_path),
             "compare_summary": cast("Value", summary),
+            "compared": cast("Value", sorted(models)),
             "scores_dir": str(ctx.find_output("scores_dir")),
         },
     )

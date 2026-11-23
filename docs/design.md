@@ -1,4 +1,6 @@
-# dm-rsi 设计（草案，待确认）
+# dm-rsi 设计
+
+> 2026-11-23 修订：流程不再是独立对象，而是 meta loop「行动」阶段执行的内容，由决策逐段选择。本文 §2「流程」、§4「Meta loop」、§7「目录」里关于流程 run、模板固定步骤的描述以 [ADR 0001 的修订](adr/0001-meta-rsi.md) 为准。
 
 dm-rsi 是 DM-RSI-Framework 里 "High-level controller" 方向的实现：决策模型 RSI 的**统一入口**。它负责调度各方向的 sub-RSI 把整条流程跑通，监控结果、诊断问题，在 dm-rsi 和各 sub-RSI 之间用 issue 双向沟通。
 
