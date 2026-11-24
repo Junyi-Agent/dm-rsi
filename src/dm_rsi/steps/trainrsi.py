@@ -34,11 +34,12 @@ import yaml
 
 from dm_rsi import agent, subenv
 from dm_rsi.approvals import Kind, State
+from dm_rsi.steps import handoff
 from dm_rsi.steps.training import paths, script_env
 from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
-    from xtra_rsi.payload import Payload, Value
+    from xtra_rsi.payload import Value
 
     from dm_rsi.config import Config
     from dm_rsi.workspace import StepContext
@@ -131,54 +132,12 @@ def write_configs(ctx: StepContext) -> Path:
     return run_path
 
 
-# ---- 读 trsi 的记录（只读） --------------------------------------------------------------------------------
+# ---- 读 trsi 的记录（只读，经 steps/handoff.py）-------------------------------------------------------
 
 
-class Records:
-    """``<out_dir>/<run_name>/`` 下的记录和共享的 ``<out_dir>/trials/``。"""
-
-    def __init__(self, run_path: Path) -> None:
-        """读一次快照。"""
-        self.run: dict[str, Value] = _load(run_path)
-        self.out = Path(str(self.run["out_dir"]))
-        self.home = self.out / str(self.run["run_name"])
-        p = self.home / "archive.jsonl"
-        lines = p.read_text(encoding="utf-8").splitlines() if p.is_file() else []
-        self.events: list[dict[str, Value]] = [json.loads(x) for x in lines if x.strip()]
-        self.trials: dict[str, dict[str, Value]] = {}
-        for e in self.of("use"):
-            t = self.out / "trials" / f"{e['trial']}.json"
-            if t.is_file() and str(e["trial"]) not in self.trials:
-                self.trials[str(e["trial"])] = json.loads(t.read_text(encoding="utf-8"))
-
-    def of(self, kind: str) -> list[dict[str, Value]]:
-        """某类事件。"""
-        return [e for e in self.events if e.get("event") == kind]
-
-    @property
-    def seeds(self) -> list[int]:
-        """规则里的种子，第一个是探针。"""
-        rules = cast("dict[str, Value]", self.run.get("rules") or {})
-        return [int(cast("int", s)) for s in cast("list[Value]", rules.get("seeds") or [0, 1, 2])]
-
-    @property
-    def start_cid(self) -> str | None:
-        """起点方案的编号（init 时第一次设为当前方案）。"""
-        inc = self.of("incumbent")
-        return str(inc[0]["candidate"]) if inc else None
-
-    def incumbent(self) -> dict[str, Value]:
-        """``incumbent.yaml``。"""
-        return _load(self.home / "incumbent.yaml")
-
-    def running_gpus(self) -> set[int]:
-        """本 run 里还在跑的试验占着的卡。"""
-        busy: set[int] = set()
-        launched = {str(e["trial"]): e for e in self.of("launch")}
-        for tid, rec in self.trials.items():
-            if rec.get("status") == "running" and tid in launched:
-                busy |= {int(cast("int", g)) for g in cast("list[Value]", launched[tid]["gpus"])}
-        return busy
+def _records(run_path: Path) -> handoff.TrsiRecords:
+    """Trsi 一个 run 的记录快照。"""
+    return handoff.TrsiRecords(_load(run_path), run_path)
 
 
 def _recipe_gpus(recipe: Path) -> int:
@@ -198,7 +157,7 @@ def _item(  # noqa: PLR0913 -- 一次启动的全部描述
     }
 
 
-def _start_seeds(rec: Records) -> list[dict[str, Value]]:
+def _start_seeds(rec: handoff.TrsiRecords) -> list[dict[str, Value]]:
     if not rec.start_cid:
         return []
     why = "起点（团队配方）的种子，不计预算"
@@ -209,7 +168,7 @@ def _start_seeds(rec: Records) -> list[dict[str, Value]]:
     ]
 
 
-def _new_probes(ctx: StepContext, rec: Records) -> list[dict[str, Value]]:
+def _new_probes(ctx: StepContext, rec: handoff.TrsiRecords) -> list[dict[str, Value]]:
     launched = cast("list[Value]", ctx.data.setdefault("launched_proposals", []))
     return [
         _item(p.name, str(p), rec.seeds[0], "新候选的探针种子", cast("Value", _load(p)))
@@ -218,7 +177,7 @@ def _new_probes(ctx: StepContext, rec: Records) -> list[dict[str, Value]]:
     ]
 
 
-def _more_seeds(rec: Records) -> list[dict[str, Value]]:
+def _more_seeds(rec: handoff.TrsiRecords) -> list[dict[str, Value]]:
     out: list[dict[str, Value]] = []
     verdicts = {str(e["candidate"]) for e in rec.of("verdict")}
     inc_cid = str(rec.incumbent().get("candidate_id"))
@@ -278,7 +237,9 @@ def _refuse_bad_probes(
     return ok
 
 
-def _retries(ctx: StepContext, rec: Records) -> tuple[list[dict[str, Value]], list[str]]:
+def _retries(
+    ctx: StepContext, rec: handoff.TrsiRecords
+) -> tuple[list[dict[str, Value]], list[str]]:
     """失败的试验：还能重试的 → 启动项；重试用完的 → 说明。"""
     max_retries = int(cast("int", ctx.param("max_retries", 1)))
     proposals = {str(e["candidate"]): str(e["proposal"]) for e in rec.of("propose")}
@@ -311,7 +272,7 @@ def _retries(ctx: StepContext, rec: Records) -> tuple[list[dict[str, Value]], li
     return todo, exhausted
 
 
-def _launches(ctx: StepContext, rec: Records, run_path: Path) -> list[dict[str, Value]]:
+def _launches(ctx: StepContext, rec: handoff.TrsiRecords, run_path: Path) -> list[dict[str, Value]]:
     """还要启动的训练：失败试验的重试 → 起点的种子 → 新候选的探针 → 探针通过的候选的其余种子。"""
     retries, _ = _retries(ctx, rec)
     probes = _refuse_bad_probes(ctx, run_path, _new_probes(ctx, rec))
@@ -347,7 +308,7 @@ def _launch(
     seed = int(cast("int", item["seed"]))
     est = cast(
         "dict[str, Value]",
-        cast("dict[str, Value]", Records(run_path).run["budget"]).get("estimate") or {},
+        cast("dict[str, Value]", _records(run_path).run["budget"]).get("estimate") or {},
     )
     hours = est.get(str(cand.get("base")))
     a = ctx.gate(
@@ -385,7 +346,7 @@ def _launch(
     launched = cast("list[Value]", ctx.data.setdefault("launched_proposals", []))
     if (
         item["proposal"] is not None
-        and seed == Records(run_path).seeds[0]
+        and seed == _records(run_path).seeds[0]
         and str(item["label"]) not in launched
     ):
         launched.append(str(item["label"]))
@@ -396,43 +357,25 @@ def _launch(
 
 def _finish(ctx: StepContext, run_path: Path, why: str) -> Outcome:
     _trsi(ctx, "report", "report", str(run_path))
-    rec = Records(run_path)
-    inc = rec.incumbent()
-    cid = str(inc["candidate_id"])
-    cand = cast("dict[str, Value]", inc["candidate"])
-    ckpts: dict[str, Value] = {}
-    for tid, t in rec.trials.items():
-        if tid.startswith(f"{cid}-s") and t.get("status") == "done":
-            r = cast("dict[str, Value]", t.get("result") or {})
-            ckpts[str(t["seed"])] = {
-                "run_dir": t.get("run_dir"),
-                "checkpoint": r.get("checkpoint"),
-                "metrics": r.get("metrics"),
-            }
-    scheme: Payload = {
-        "candidate_id": cid,
-        "base": cand["base"],
-        "recipe": cand["recipe"],
-        "overrides": cast("Value", cand.get("overrides") or {}),
-        "note": cast("Value", cand.get("note") or ""),
-        "is_start": cid == rec.start_cid,
-    }
+    rec = _records(run_path)
+    sch = rec.scheme()
+    cid = sch.candidate_id
     refused = cast("dict[str, Value]", ctx.data.get("refused") or {})
     if refused:
         why += f"；{len(refused)} 个候选被 trsi 的规则拒绝：{', '.join(refused)}"
     return Outcome(
         StepState.DONE,
-        f"训练方案定为 `{cid}`（{cand['base']} {Path(str(cand['recipe'])).stem}）：{why}",
+        f"训练方案定为 `{cid}`（{sch.base} {Path(sch.recipe).stem}，交接来自 {sch.source}）：{why}",
         outputs={
-            "train_scheme": scheme,
-            "train_rsi_report": str(rec.home / "report.md"),
+            "train_scheme": sch.to_scheme(),
+            "train_rsi_report": str(rec.report),
             "train_rsi_home": str(rec.home),
-            "train_checkpoints": ckpts,
+            "train_checkpoints": cast("Value", sch.checkpoints),
         },
     )
 
 
-def _propose(ctx: StepContext, rec: Records) -> list[str]:
+def _propose(ctx: StepContext, rec: handoff.TrsiRecords) -> list[str]:
     """判断环节：诊断当前方案、写 1–2 个候选。default 模式不提候选（只跑起点）。"""
     if str(ctx.param("judge", "default")) != "agent":
         return []
@@ -480,7 +423,7 @@ def _refresh(ctx: StepContext, run_path: Path) -> str:
     return nxt
 
 
-def _failed(ctx: StepContext, rec: Records) -> Outcome | None:
+def _failed(ctx: StepContext, rec: handoff.TrsiRecords) -> Outcome | None:
     """重试用完仍失败的试验 → 整段失败。还能重试的由 :func:`_retries` 排进启动列表。"""
     _, exhausted = _retries(ctx, rec)
     if not exhausted:
@@ -496,7 +439,7 @@ def _launch_what_fits(
     ctx: StepContext, run_path: Path, todo: list[dict[str, Value]], nxt: str
 ) -> tuple[bool, int]:
     """按顺序启动放得下的训练，每个先审批；一次只问一个。返回 (在等审批, 启动了几个)。"""
-    rec = Records(run_path)
+    rec = _records(run_path)
     m = _BUDGET_RE.search(nxt)
     budget = f"已花 {m.group(1)} / {m.group(2)} 卡时" if m else "（next 没有打印预算）"
     free = [g for g in _gpu_ids(rec) if g not in rec.running_gpus()]
@@ -512,7 +455,7 @@ def _launch_what_fits(
     return False, launched
 
 
-def _gpu_ids(rec: Records) -> list[int]:
+def _gpu_ids(rec: handoff.TrsiRecords) -> list[int]:
     gpus = cast("dict[str, Value]", rec.run["gpus"])
     return [int(cast("int", g)) for g in cast("list[Value]", gpus["ids"])]
 
@@ -522,7 +465,7 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: PLR0911 -- 每个出口对应一�
     """推进一步 Training RSI。"""
     run_path = write_configs(ctx)
     nxt = _refresh(ctx, run_path)
-    rec = Records(run_path)
+    rec = _records(run_path)
     failed = _failed(ctx, rec)
     if failed is not None:
         return failed
@@ -531,7 +474,7 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: PLR0911 -- 每个出口对应一�
     if stop:  # 预算不够：只补起点的种子（不计预算），候选不再启动
         todo = [t for t in todo if t["proposal"] is None]
     blocked, launched = _launch_what_fits(ctx, run_path, todo, nxt)
-    rec = Records(run_path)
+    rec = _records(run_path)
     running = [tid for tid, t in rec.trials.items() if t.get("status") == "running"]
     if blocked:
         return Outcome(StepState.BLOCKED, f"等人批准下一次训练（在跑 {len(running)} 个）")

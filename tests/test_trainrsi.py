@@ -105,7 +105,7 @@ def test_every_trsi_launch_needs_approval_then_scheme_drives_training(
     sch = out["train_scheme"]
     assert sch["base"] == "elephant-1"
     assert sch["is_start"] is True
-    assert sch["recipe"].endswith("configs/recipes/elephant_lora_1g.yaml")
+    assert str(sch["recipe"]).endswith("configs/recipes/elephant_lora_1g.yaml")
     assert set(out["train_checkpoints"]) == {"0", "1", "2"}
     assert all(a.state is State.DONE for a in store.all())
 
@@ -200,6 +200,7 @@ print(json.dumps({"result": "诊断：……", "total_cost_usd": 0.01, "is_error
 
 def _drive(cfg, name, store, n=15):
     states = []
+    res = {}
     for _ in range(n):
         _approve_pending(store)
         res = _step(cfg, name, store)

@@ -152,3 +152,12 @@ Borui 在 `BoruiXu/Decision-Model-Study@rsi-agent-harness`（`e34f705`）做了�
 Borui 把数据分成 trainset、valset、evalset、封存 test 四层：evalset 只给裁判，产出模型的模块看不到；每次升级判定用掉一次，有使用上限。dm-rsi 现在 Data 对比、Decision Policy 的 evolve、上面的版本判定都在 val 上，loop 转得越多，val 越被拟合，版本判定会偏乐观。test 只能读一次，不能替代 evalset。
 
 要做的话，可以从 val 里按 id 确定性地切出一块作为 dm-rsi 的 evalset，只给版本判定用，不交给 dgen 和 dpolicy。这会改变 Data 和 Decision Policy 拿到的 val，需要和 Bingqiao、Yile 对齐契约（走 issue），所以先不实施。
+
+## 修订（2026-11-24，第三次）：交接集中到一个模块，加 CI
+
+和 Borui 的接口设计比较后（见第二次修订）：Borui 的强项是每次交接都有 schema 和登记时核对；dm-rsi 的弱点是契约只覆盖分数文件，其余交接直接读 sub-RSI 的内部记录（十几处），他们一改内部格式 dm-rsi 就坏，而且坏在编排逻辑深处。用户 2026-11-24 决定两件都做。
+
+- **交接集中**：新模块 `steps/handoff.py` 是 dm-rsi 读 sub-RSI 文件的唯一入口，给出带类型的对象（`TrainScheme`、`TrsiRecords`、`Arm`、`Build`、`Compare`、`Incumbent`）。每个读取都经 `need` 检查字段和类型，问题报 `ContractError`，写明文件、字段和实际值。`tests/test_handoff.py` 检查别的模块代码里没有出现 sub-RSI 的内部文件名。
+- **正式交接文件**：格式见 `docs/handoff.md`（`handoff: 1`）。Training 和 Decision Policy 的 `handoff.yaml` 存在时优先读；没有时从内部记录兼容读取，两种来源过同一套检查。Data 的格式先提议，等 Bingqiao 确认后再接。不要求各方向改成 Borui 那种 manifest。给三个方向的提议走 `dm-rsi issue draft`，人批准后才发出。
+- **CI**：`.github/workflows/ci.yml`，push 到 main 和 PR 时跑 `ruff format --check`、`ruff check`、`basedpyright`、`pytest -m "not slow"`。xtra-rsi 是私有仓库，CI 要仓库 secret `XTRA_RSI_TOKEN`（只读它的 fine-grained token）。
+- **tests 的类型检查**：`basedpyright` 的 `include` 仍含 `tests`；只对 tests 关掉「对动态值（Payload）取下标、比较、传参」几类规则（`executionEnvironments`），其余照常检查，`src` 不放宽。原来 tests 下 345 个报错大多是这一类，余下 2 个已修。

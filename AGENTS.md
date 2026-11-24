@@ -16,7 +16,7 @@ DM-RSI-Framework 的 meta RSI：统一入口，调度各方向的 sub-RSI（Data
 uv sync
 uv run pytest -q                 # 含 slow：用 sub-RSI 真实 CLI 跑合成流程（约 2 分钟）
 uv run pytest -q -m "not slow"
-uv run ruff format && uv run ruff check && uv run basedpyright src
+uv run ruff format src tests && uv run ruff check src tests && uv run basedpyright   # CI（.github/workflows/ci.yml）跑同样的检查和 -m "not slow"
 ```
 
 ## 规则
@@ -28,5 +28,5 @@ uv run ruff format && uv run ruff check && uv run basedpyright src
 - 需要审批：每次启动训练、`final-test`（及 `--again`）、对外发 issue、付费 LLM 生成数据、提交到 ssh / pbs 后端、Data RSI 的人工抽检完成确认。
 - 不读 test：只有 `final_test` 步骤（审批后）读 test。
 - 给 sub-RSI 的问题用 `dm-rsi issue draft` 起草（进审批队列），不要直接 `gh issue create`。
-- sub-RSI 的产物通过文件契约交接（`steps/contracts.py`）；契约不符时报错并转成 issue，不在 dm-rsi 里悄悄修补别人的数据。
+- sub-RSI 的产物通过文件契约交接：**只在 `steps/handoff.py` 里读 sub-RSI 写的文件**（格式见 `docs/handoff.md`，`tests/test_handoff.py` 会检查），分数文件的校验和重算在 `steps/contracts.py`；契约不符时报错并转成 issue，不在 dm-rsi 里悄悄修补别人的数据。
 - 架构或流程决策写 ADR（`docs/adr/`）；agent 最多把状态改到「采纳」。

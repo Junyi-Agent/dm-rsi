@@ -15,11 +15,11 @@ Policy 的 incumbent，带 val 上的目标值（dpolicy 的 ``objective``，默
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from dm_rsi import yamlfile
+from dm_rsi.steps import handoff
 
 if TYPE_CHECKING:
     from xtra_rsi.payload import Payload, Value
@@ -48,22 +48,17 @@ def settings(ws: Workspace) -> Payload:
 
 
 def dp_incumbent(dp_dir: Path) -> Payload | None:
-    """Decision Policy 第 0 个副本的 incumbent：最后一个被接受的候选，没有就是基线策略。"""
-    arch = dp_dir / "r0" / "archive.jsonl"
-    if not arch.is_file():
-        return None
-    recs = [cast("Payload", json.loads(x)) for x in arch.read_text().splitlines() if x.strip()]
-    acc = [r for r in recs if r.get("accepted") and r.get("source") != "baseline"]
-    base = next((r for r in recs if r.get("source") == "baseline"), None)
-    inc = acc[-1] if acc else base
+    """Decision Policy 第 0 个副本的 incumbent（经 :mod:`dm_rsi.steps.handoff`）。"""
+    inc = handoff.dpolicy_incumbent(dp_dir / "r0")
     if inc is None:
         return None
     return {
-        "name": inc.get("name"),
-        "hash": inc.get("hash"),
-        "objective": float(cast("float", inc["objective"])),
-        "is_baseline": not acc,
-        "evaluated": len(recs) - 1,
+        "name": inc.name,
+        "hash": inc.hash,
+        "objective": inc.objective,
+        "is_baseline": inc.is_baseline,
+        "evaluated": inc.evaluated,
+        "source": inc.source,
     }
 
 
@@ -76,7 +71,7 @@ def register(ws: Workspace, step: str, outputs: Payload) -> Payload:
             return e
     inc = dp_incumbent(Path(str(outputs["dp_dir"])))
     if inc is None:
-        msg = f"{step}：{outputs['dp_dir']}/r0/archive.jsonl 里没有 incumbent，不能登记版本"
+        msg = f"{step}：{outputs['dp_dir']}/r0 还没有 incumbent（dpolicy 没 init？），不能登记版本"
         raise ValueError(msg)
     objective = float(cast("float", inc["objective"]))
     min_delta = float(cast("float", settings(ws)["min_delta"]))

@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv, yamlfile
 from dm_rsi.approvals import Kind, State
-from dm_rsi.steps import contracts, judge
+from dm_rsi.steps import contracts, handoff, judge
 from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
@@ -87,17 +87,6 @@ def write_config(ctx: StepContext) -> Path:
     return path
 
 
-def _archive(out: Path) -> list[dict[str, object]]:
-    f = out / "archive.jsonl"
-    if not f.is_file():
-        return []
-    return [
-        cast("dict[str, object]", json.loads(line))
-        for line in f.read_text().splitlines()
-        if line.strip()
-    ]
-
-
 @step_kind("dgen.rsi")
 def rsi(ctx: StepContext) -> Outcome:  # noqa: C901 -- 按 SKILL 主流程逐步写，拆开反而难对照
     """运行 Data RSI 主流程，到 build 为止。"""
@@ -125,13 +114,13 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: C901 -- 按 SKILL 主流程逐步
 
     # 5. generate：内容相同的配方只生成一次，所以重复调用安全
     _dgen(ctx, "generate", "generate", str(conf))
-    arms = [r for r in _archive(out) if r.get("source") == "recipe"]
+    arms = handoff.dgen_arms(out)
     if not arms:
         return Outcome(StepState.FAILED, f"generate 没有产出任何配方，见 {out}/report.md")
 
     # 7. 人工抽检（spotcheck: required 时等人填 spotcheck.csv 后批准）
     if str(ctx.param("spotcheck", "required")) == "required":
-        sheets = [str(out / "arms" / str(a["hash"]) / "spotcheck.csv") for a in arms]
+        sheets = [str(out / "arms" / a.hash / "spotcheck.csv") for a in arms]
         a = ctx.gate(
             Kind.SPOTCHECK,
             f"Data RSI 人工抽检（{len(arms)} 个配方）",
@@ -159,27 +148,25 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: C901 -- 按 SKILL 主流程逐步
     built: list[Payload] = []
     max_arms = int(cast("int", ctx.param("max_arms", 4)))
     for arm in arms[:max_arms]:
-        h, name = str(arm["hash"]), str(arm["name"])
-        tdir = out / "train" / name
-        if not (tdir / "build_report.json").is_file():
-            _dgen(ctx, f"build-{h}", "build", str(conf), h, "--name", name)
-        report = cast("dict[str, object]", json.loads((tdir / "build_report.json").read_text()))
-        train = next((p for p in tdir.iterdir() if p.name.startswith("train.")), None)
-        if train is None:
-            return Outcome(StepState.FAILED, f"{tdir} 里没有 train.* 文件")
-        stats = cast("dict[str, object]", arm.get("stats") or {})
+        tdir = out / "train" / arm.name
+        b = handoff.dgen_build(tdir)
+        if b is None:
+            _dgen(ctx, f"build-{arm.hash}", "build", str(conf), arm.hash, "--name", arm.name)
+            b = handoff.dgen_build(tdir)
+        if b is None:
+            return Outcome(StepState.FAILED, f"dgen build 之后 {tdir} 里没有 build_report.json")
         built.append(
             {
-                "hash": h,
-                "name": name,
-                "train_path": str(train),
-                "rows": cast("Value", report.get("rows")),
-                "kept": cast("Value", stats.get("kept")),
+                "hash": arm.hash,
+                "name": arm.name,
+                "train_path": str(b.train_path),
+                "rows": b.rows,
+                "kept": arm.stats.get("kept"),
             }
         )
     return Outcome(
         StepState.DONE,
-        f"{len(built)} 个训练文件：" + ", ".join(f"{b['name']}({b['hash']})" for b in built),
+        f"{len(built)} 个训练文件：" + ", ".join(f"{x['name']}({x['hash']})" for x in built),
         outputs={
             "arms": cast("Value", built),
             "dgen_config": str(conf),
@@ -200,8 +187,8 @@ def compare(ctx: StepContext) -> Outcome:
     base_key = "base"
     # dgen 拒绝覆盖已有的对比；每次执行用自己的 tag
     tag = str(ctx.param("tag", f"dmrsi-{ctx.step.name}"))
-    res_path = ctx.ws.dir / "data-rsi" / "out" / "compare" / tag / "compare.json"
-    if not res_path.is_file():
+    out = ctx.ws.dir / "data-rsi" / "out"
+    if not handoff.compare_path(out, tag).is_file():
         runs = ",".join(f"{k}={v}" for k, v in models.items())
         _dgen(
             ctx,
@@ -215,29 +202,18 @@ def compare(ctx: StepContext) -> Outcome:
             "--tag",
             tag,
         )
-    res = cast("dict[str, object]", json.loads(res_path.read_text()))
-    result = cast("dict[str, object]", res["result"])
+    cmp_ = handoff.dgen_compare(out, tag)
     # 交接时重算：dgen 报告的 val 指标要和分数文件对得上，才拿它选模型
     scores_dir = Path(str(ctx.find_output("scores_dir")))
     verified = contracts.recompute(ctx.cfg, scores_dir, models, "val")
-    reported = {
-        str(r["run"]): {**r, "rows": result.get("n"), "pos": result.get("n_pos")}
-        for r in cast("list[dict[str, object]]", result.get("table") or [])
-    }
-    contracts.check_reported(reported, verified, f"dgen compare（{res_path}）")
-    primary = str(res.get("primary", "auprc"))
-    diffs = [
-        d
-        for d in cast("list[dict[str, object]]", result.get("diffs") or [])
-        if d.get("metric") == primary
-    ]
-    passing = [d for d in diffs if d.get("passes_accept")]
-    winner_key = (
-        str(max(passing, key=lambda d: cast("float", d["diff"]))["run"]) if passing else base_key
-    )
+    reported = {k: {**r, "rows": cmp_.n, "pos": cmp_.n_pos} for k, r in cmp_.table.items()}
+    contracts.check_reported(reported, verified, f"dgen compare（{cmp_.path}）")
+    primary = cmp_.primary
+    diffs = [d for d in cmp_.diffs if d.metric == primary]
+    passing = [d for d in diffs if d.passes_accept]
+    winner_key = max(passing, key=lambda d: d.diff).run if passing else base_key
     summary = {
-        str(d["run"]): {"diff": d["diff"], "lo": d["lo"], "hi": d["hi"], "pass": d["passes_accept"]}
-        for d in diffs
+        d.run: {"diff": d.diff, "lo": d.lo, "hi": d.hi, "pass": d.passes_accept} for d in diffs
     }
     return Outcome(
         StepState.DONE,
@@ -245,7 +221,7 @@ def compare(ctx: StepContext) -> Outcome:
         outputs={
             "model": models[winner_key],
             "model_key": winner_key,
-            "compare": str(res_path),
+            "compare": str(cmp_.path),
             "compare_summary": cast("Value", summary),
             "compared": cast("Value", sorted(models)),
             "scores_dir": str(scores_dir),

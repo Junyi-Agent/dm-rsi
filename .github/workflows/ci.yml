@@ -1,0 +1,38 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # sub-RSI 的 submodule 只用来读 pyproject / 配置；不递归（嵌套的 onejev-harness 用不到）
+          submodules: true
+
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      # xtra-rsi 是私有仓库：仓库 secret XTRA_RSI_TOKEN 是一个只读 Junyi-Agent/xtra-rsi 的 fine-grained token
+      - name: 允许读取 xtra-rsi
+        env:
+          TOKEN: ${{ secrets.XTRA_RSI_TOKEN }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::缺少仓库 secret XTRA_RSI_TOKEN（只读 Junyi-Agent/xtra-rsi 的 token），uv sync 拉不到 xtra-rsi"
+            exit 1
+          fi
+          git config --global url."https://x-access-token:${TOKEN}@github.com/Junyi-Agent/xtra-rsi".insteadOf "https://github.com/Junyi-Agent/xtra-rsi"
+
+      - run: uv sync --locked
+      - run: uv run ruff format --check src tests
+      - run: uv run ruff check src tests
+      - run: uv run basedpyright
+      # slow 测试要本机的 sub-RSI venv 和真实 CLI（约 1.5 分钟），CI 里只跑快的；没有 venv 的测试会自动跳过
+      - run: uv run pytest -q -m "not slow"

@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, cast
 from dm_rsi import subenv, versions
 from dm_rsi.approvals import Kind, State
 from dm_rsi.steps import dgen as dgen_step
+from dm_rsi.steps import handoff
 from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
@@ -40,20 +41,16 @@ def _val_summary(ctx: StepContext) -> list[str]:
         lines.append("  Data：没有配方通过，Decision Policy 用的是基线模型")
     best = versions.best(ctx.ws)
     dp_dir = Path(str(best["dp_dir"])) if best else Path(str(ctx.find_output("dp_dir")))
-    arch = dp_dir / "r0" / "archive.jsonl"
-    if arch.is_file():
-        recs = [json.loads(x) for x in arch.read_text().splitlines() if x.strip()]
-        base = next((r for r in recs if r.get("source") == "baseline"), None)
-        acc = [r for r in recs if r.get("accepted") and r.get("source") != "baseline"]
-        if base is not None:
-            line = f"  Decision Policy：基线策略 val(select) f1_e2e = {float(base['objective']):.3f}，评估了 {len(recs) - 1} 个候选，"
-            if acc:
-                inc = acc[-1]
-                vs = cast("dict[str, float]", inc.get("vs_incumbent") or {})
-                line += f"接受了 {len(acc)} 个，当前 incumbent {inc['name']} = {float(inc['objective']):.3f}（差 {vs.get('diff', 0):+.3f}）"
-            else:
-                line += "没有一个通过接受规则，incumbent 仍是基线策略"
-            lines.append(line)
+    inc = handoff.dpolicy_incumbent(dp_dir / "r0")
+    if inc is not None:
+        base = "?" if inc.baseline_objective is None else f"{inc.baseline_objective:.3f}"
+        line = f"  Decision Policy：基线策略 val(select) f1_e2e = {base}，评估了 {inc.evaluated} 个候选，"
+        if not inc.is_baseline:
+            diff = 0.0 if inc.diff_vs_previous is None else inc.diff_vs_previous
+            line += f"接受了 {inc.accepted} 个，当前 incumbent {inc.name} = {inc.objective:.3f}（差 {diff:+.3f}）"
+        else:
+            line += "没有一个通过接受规则，incumbent 仍是基线策略"
+        lines.append(line)
     return lines
 
 
@@ -103,10 +100,10 @@ def final_test(ctx: StepContext) -> Outcome:
     best = versions.best(ctx.ws)
     dp_configs = best["dp_configs"] if best else ctx.find_output("dp_configs")
     dp_conf = Path(str(cast("list[str]", dp_configs)[0]))
-    consensus = dp_conf.parent / "r0" / "consensus.yaml"
+    consensus = handoff.dpolicy_consensus(dp_conf.parent)
     plan: Payload = {
         "data": f"dgen final-test：{len(models) - 1} 个重训模型 vs 基线，在 test 上一次",
-        "decision_policy": f"dpolicy final-test：baseline vs incumbent{'（含共识选择）' if consensus.is_file() else ''}，在 test 上一次",
+        "decision_policy": f"dpolicy final-test：baseline vs incumbent{'（含共识选择）' if consensus else ''}，在 test 上一次",
         "dgen_config": str(dgen_step.config_path(ctx)),
         "dpolicy_config": str(dp_conf),
     }
@@ -122,9 +119,9 @@ def final_test(ctx: StepContext) -> Outcome:
         return ctx.blocked_on(a, "final-test")
 
     results: Payload = {}
-    dg_out = ctx.ws.dir / "data-rsi" / "out" / "final_test" / "final" / "final_test.json"
+    dg_root = ctx.ws.dir / "data-rsi" / "out"
     if len(models) > 1:
-        if not dg_out.is_file():
+        if handoff.dgen_final_test(dg_root) is None:
             runs = ",".join(f"{k}={v}" for k, v in models.items())
             subenv.run_module(
                 ctx.cfg,
@@ -140,13 +137,13 @@ def final_test(ctx: StepContext) -> Outcome:
                 log_dir=ctx.log_dir,
                 name="dgen-final-test",
             )
-        found = next((ctx.ws.dir / "data-rsi" / "out").rglob("final_test.json"), None)
+        found = handoff.dgen_final_test(dg_root)
         results["data"] = str(found) if found else None
 
-    dp_json = dp_conf.parent / "r0" / "final_test.json"
+    dp_json = handoff.dpolicy_final_test_path(dp_conf.parent / "r0")
     if not dp_json.is_file():
         args = ["final-test", str(dp_conf), "--allow-test"]
-        if consensus.is_file():
+        if consensus is not None:
             args += ["--policy", str(consensus)]
         subenv.run_module(
             ctx.cfg,
@@ -157,12 +154,7 @@ def final_test(ctx: StepContext) -> Outcome:
             log_dir=ctx.log_dir,
             name="dpolicy-final-test",
         )
-    dp = cast("dict[str, object]", json.loads(dp_json.read_text()))
-    pols = cast("dict[str, dict[str, object]]", dp.get("policies") or {})
-    headline = {
-        k: {"objective": v.get("objective"), "vs_baseline": v.get("vs_baseline")}
-        for k, v in pols.items()
-    }
+    headline = handoff.dpolicy_final_test(dp_conf.parent / "r0")
     results["decision_policy"] = str(dp_json)
     results["final_version"] = cast("Value", best["version"] if best else None)
     results["dp_headline"] = cast("Value", json.loads(json.dumps(headline, default=str)))

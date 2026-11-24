@@ -61,6 +61,12 @@ typeCheckingMode = "standard"
 pythonVersion = "3.13"
 include = ["src", "tests"]
 exclude = ["subrsi", ".claude", ".venv", "**/__pycache__"]
+# 测试里大量断言 Payload（嵌套的动态字典）的内容：只对 tests 关掉「对动态值取下标、比较、传参」这几类，
+# 其余规则（属性、未绑定变量、未定义名字、导入……）照常检查。src 不放宽。
+executionEnvironments = [
+  { root = "tests", extraPaths = ["src"], reportIndexIssue = "none", reportOptionalSubscript = "none", reportOptionalIterable = "none", reportOptionalMemberAccess = "none", reportOperatorIssue = "none", reportCallIssue = "none", reportArgumentType = "none", reportGeneralTypeIssues = "none" },
+  { root = "src" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

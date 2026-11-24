@@ -8,13 +8,12 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv, versions, yamlfile
-from dm_rsi.steps import judge
+from dm_rsi.steps import handoff, judge
 from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
@@ -181,7 +180,7 @@ def rsi(ctx: StepContext) -> Outcome:
         confs.append(conf)
         out = base / f"r{r}"
         _dpolicy(ctx, f"check-r{r}", "check", str(conf))
-        if not (out / "incumbent.yaml").is_file():
+        if not handoff.dpolicy_initialised(out):
             _dpolicy(ctx, f"init-r{r}", "init", str(conf))
         for k in range(first, first + rounds):
             done = out / f".dmrsi-round{k}.done"
@@ -189,10 +188,7 @@ def rsi(ctx: StepContext) -> Outcome:
                 continue
             proposals = out / "proposals"
             if r == 0:
-                inc = cast(
-                    "Payload", json.loads((out / "archive.jsonl").read_text().splitlines()[-1])
-                )
-                diag = out / "eval" / str(inc.get("hash")) / "diagnosis.md"
+                diag = handoff.dpolicy_diagnosis(out)
                 # 每轮重新写提案（SKILL 第 7 步：不要只靠自动变异）；旧提案移到 proposals.round<k-1>
                 if k > 0 and proposals.is_dir():
                     shutil.move(proposals, out / f"proposals.round{k - 1}")
@@ -209,16 +205,15 @@ def rsi(ctx: StepContext) -> Outcome:
         "dp_model": model,
         "dp_dir": str(base),
         "dp_configs": [str(c) for c in confs],
-        "incumbent": str(base / "r0" / "incumbent.yaml"),
-        "dp_report": str(base / "r0" / "report.md"),
+        "dp_report": str(handoff.dpolicy_report(base / "r0")),
     }
     note = f"模型 {model}：{replicates} 个副本 × 第 {first + 1}–{first + rounds} 轮"
     if replicates > 1:
         text = _dpolicy(ctx, "consensus", "consensus", *map(str, confs))
         (ctx.dir / "consensus.txt").write_text(text)
-        pick = base / "r0" / "consensus.yaml"
-        outputs["consensus"] = str(pick) if pick.is_file() else None
-        note += "，共识：" + ("有" if pick.is_file() else "没有候选过半通过")
+        pick = handoff.dpolicy_consensus(base)
+        outputs["consensus"] = str(pick) if pick else None
+        note += "，共识：" + ("有" if pick else "没有候选过半通过")
     v = versions.register(ctx.ws, ctx.step.name, outputs)
     note += f"；版本判定：{v['decision']}" + (f" → {v['version']}" if v.get("version") else "")
     note += f"（{v['reason']}）"
