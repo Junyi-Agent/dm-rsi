@@ -122,7 +122,16 @@ def test_cli_approve_sends_issue(cfg, gh, capsys):
     assert title == "[training] t"
     assert "@CD22104" in body
     assert store.get(res.approval.id).state is State.DONE
-    assert "url" in (store.get(res.approval.id).result or {})
+    url = (store.get(res.approval.id).result or {})["url"]
+    out = capsys.readouterr().out
+    assert out == f"{res.approval.id} 已批准：发 issue 给 training：[training] t，已发出：{url}\n"
+
+    other = issues.draft(cfg, gh, store, direction="training", key="k2", title="t2", body="b")
+    assert other.approval is not None
+    rc = cli.main(["--home", str(cfg.home), "reject", other.approval.id, "--reason", "不发"], gh=gh)
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert out == f"{other.approval.id} 已拒绝：发 issue 给 training：[training] t2（原因：不发）\n"
 
 
 def test_send_failure_is_recorded(cfg):

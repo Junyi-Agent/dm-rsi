@@ -81,14 +81,22 @@ def cmd_approve(args: argparse.Namespace, cfg: config.Config, gh: GitHub) -> int
     a = store.decide(args.id, approve=True, reason=args.reason)
     if a.kind is Kind.ISSUE:
         a = issues.send(gh, store, a.id)
-    _emit(a.to_dict())
-    return 0 if a.state is not State.FAILED else 1
+    res = a.result or {}
+    if a.state is State.FAILED:
+        sys.stdout.write(
+            f"{a.id} 已批准，但执行失败：{res.get('error')}（dm-rsi approvals 看详情）\n"
+        )
+        return 1
+    tail = f"，已发出：{res['url']}" if "url" in res else ""
+    sys.stdout.write(f"{a.id} 已批准：{a.title}{tail}\n")
+    return 0
 
 
 def cmd_reject(args: argparse.Namespace, cfg: config.Config, _gh: GitHub) -> int:
     """（人）拒绝，必须写原因。"""
     store = ApprovalStore(cfg.approvals_dir)
-    _emit(store.decide(args.id, approve=False, reason=args.reason).to_dict())
+    a = store.decide(args.id, approve=False, reason=args.reason)
+    sys.stdout.write(f"{a.id} 已拒绝：{a.title}（原因：{a.reason}）\n")
     return 0
 
 
