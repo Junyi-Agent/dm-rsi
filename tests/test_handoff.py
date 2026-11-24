@@ -131,7 +131,10 @@ def test_dpolicy_incumbent_compat_and_official(tmp_path):
     assert inc is not None
     assert (inc.name, inc.objective, inc.accepted, inc.evaluated) == ("p1", 0.55, 1, 2)
     assert inc.baseline_objective == 0.5
-    assert handoff.dpolicy_last_hash(r0) == "h2"
+    # 诊断要取 incumbent 的，不是最后评估的那个（p2 没被接受）
+    (r0 / "eval" / "h1").mkdir(parents=True)
+    (r0 / "eval" / "h1" / "diagnosis.md").write_text("incumbent 的诊断")
+    assert handoff.dpolicy_diagnosis(r0) == r0 / "eval" / "h1" / "diagnosis.md"
 
     (r0 / "handoff.yaml").write_text(
         yaml.safe_dump(

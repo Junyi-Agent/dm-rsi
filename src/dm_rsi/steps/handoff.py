@@ -469,19 +469,20 @@ def dpolicy_incumbent(run_dir: Path) -> Incumbent | None:
     )
 
 
-def dpolicy_last_hash(run_dir: Path) -> str:
-    """最近一次评估的策略（它的诊断在 ``eval/<hash>/diagnosis.md``）。"""
-    arch = run_dir / "archive.jsonl"
-    recs = _jsonl(arch)
-    if not recs:
-        msg = f"{arch} 是空的：dpolicy init 之后应该至少有基线策略"
-        raise ContractError(msg)
-    return str(need(recs[-1], f"{arch} 最后一条", hash=str)["hash"])
-
-
 def dpolicy_diagnosis(run_dir: Path) -> Path:
-    """最近一次评估的策略的诊断（写提案时给判断环节读）。"""
-    return run_dir / "eval" / dpolicy_last_hash(run_dir) / "diagnosis.md"
+    """当前 incumbent 的诊断（写提案时给判断环节读）。
+
+    不能取 archive 的最后一条：那是最后评估的候选，常常没被接受，诊断的不是当前策略。
+    """
+    inc = dpolicy_incumbent(run_dir)
+    if inc is None:
+        msg = f"{run_dir}：还没有 incumbent（dpolicy init 之后应该至少有基线策略）"
+        raise ContractError(msg)
+    p = run_dir / "eval" / inc.hash / "diagnosis.md"
+    if not p.is_file():
+        msg = f"{p} 不存在：incumbent {inc.name}（{inc.hash}）没有诊断"
+        raise ContractError(msg)
+    return p
 
 
 def dpolicy_initialised(run_dir: Path) -> bool:
