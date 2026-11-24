@@ -119,12 +119,12 @@ def test_suggest_order():
         ("final_test", {"dp_headline": {}}),
     ]
     for flow, produced in steps:
-        nxt = flows.suggest(art)
+        nxt = flows.suggest(art, "synthetic")
         assert nxt is not None
         order.append(nxt[0])
         assert nxt[0] == flow
         art.update(produced)
-    assert flows.suggest(art) is None
+    assert flows.suggest(art, "synthetic") is None
     # 对比选出的模型变了 → 重新跑 DP
     art["model"] = "A2"
-    assert flows.suggest(art)[0] == "dp_rsi"
+    assert flows.suggest(art, "synthetic")[0] == "dp_rsi"

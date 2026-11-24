@@ -48,6 +48,7 @@ ACTIONS = ("flow", "resume", "draft_issue", "wait")
 # 流程 → 出问题时归哪个方向（issue 发给谁）；None = dm-rsi 自己或环境的问题
 OWNER: dict[str, str | None] = {
     "prepare_data": "training",
+    "train_rsi": "training",
     "train_base": "training",
     "score_base": "training",
     "data_rsi": "data",
@@ -195,7 +196,9 @@ def reasoning(ctx: StageContext) -> Payload:
     for e in failed:
         owner = OWNER.get(str(e["flow"]))
         findings.append(_finding("flow_failed", e, "draft_issue" if owner else "wait", owner=owner))
-    nxt = flows.suggest(cast("Payload", up.get("artifacts") or {}))
+    nxt = flows.suggest(
+        cast("Payload", up.get("artifacts") or {}), cast("str | None", up.get("template"))
+    )
     if nxt is not None:
         flow, args, why = nxt
         if flow in {str(e["flow"]) for e in failed}:

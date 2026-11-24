@@ -11,7 +11,7 @@ dm-rsi 是 DM-RSI-Framework 里 "High-level controller" 方向的实现：决策
 | 方向 | 负责人 | 位置 | dm-rsi 怎么调用 |
 |---|---|---|---|
 | Data | Bingqiao | `subrsi/data`（`BingqiaoL/DM-RSI-Framework@data-generation-0.3`）的 `rsi_skills/data/`，`dgen` | CLI + agent 步骤 |
-| Training | Chendie（`CD22104`） | `subrsi/training`：`CD22104/decision-model-training@main`，`trsi`（check/init/launch/adopt/collect/next/report） | 已接入 submodule；流程里暂时还是 dm-rsi 直接调 onejev-harness（`ojh`），换成调 `trsi` 待定 |
+| Training | Chendie（`CD22104`） | `subrsi/training`：`CD22104/decision-model-training@main`，`trsi`（check/init/launch/adopt/collect/next/report） | 流程 `train_rsi`（`steps/trainrsi.py`）选训练方案，`train_base` / `retrain` 按它经 onejev-harness 训练 |
 | Output / Decision Policy | Yile | `subrsi/decision-policy`（`Jireh-Chen/DM-RSI-Framework@main`）的 `rsi_skills/decision_policy/`，`dpolicy` | CLI + agent 步骤 |
 
 - `subrsi/*` 是只读 submodule，dm-rsi 不在里面改代码、不提交。要改就提 issue，升级就移动 submodule 指针。

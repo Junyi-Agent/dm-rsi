@@ -13,4 +13,4 @@
 
 - 优先级：`resume` > `wait`（有人要做的事）> `draft_issue` > `flow` > `wait`。同一时间只执行一段流程：有没结束的执行时不开始新的。
 - `lessons` 里已有 `issue:<step>` 的失败不再起草 issue。
-- 流程名和允许的参数：`prepare_data(train_sub)`、`train_base(train_gpus)`、`score_base()`、`data_rsi(judge, new_recipes, max_arms)`、`retrain(recipes, train_gpus)`、`data_compare(tag)`、`dp_rsi(judge, rounds, replicates, iterations)`、`final_test()`。
+- 流程名和允许的参数：`prepare_data(train_sub)`、`train_rsi(judge, train_gpu_ids, gpu_hours, max_candidates)`（只有 elliptic 模板）、`train_base(train_gpus)`、`score_base()`、`data_rsi(judge, new_recipes, max_arms)`、`retrain(recipes, train_gpus)`、`data_compare(tag)`、`dp_rsi(judge, rounds, replicates, iterations)`、`final_test()`。

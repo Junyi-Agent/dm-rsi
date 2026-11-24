@@ -10,7 +10,7 @@ build-data → data-rsi → train → score → data-compare → dp-rsi → fina
 | 方向 | sub-RSI | 在 dm-rsi 里 |
 |---|---|---|
 | Data（Bingqiao） | `subrsi/data`（`BingqiaoL/DM-RSI-Framework@data-generation-0.3`，`dgen`） | `dgen.rsi`、`dgen.compare` |
-| Training（Chendie，`CD22104`） | `subrsi/training` ← `CD22104/decision-model-training@main`（`trsi`） | 已接入 submodule；流程里暂时还是 dm-rsi 直接调 onejev-harness（`elliptic.train`、`elliptic.score`），换成调 `trsi` 待定 |
+| Training（Chendie，`CD22104`） | `subrsi/training` ← `CD22104/decision-model-training@main`（`trsi`） | 流程 `train_rsi`（Elliptic 模板）：trsi 在卡时预算内选基座、配方和超参；之后的 `train_base`、`retrain` 都按选出的方案训练 |
 | Decision Policy（Yile） | `subrsi/decision-policy`（`Jireh-Chen/DM-RSI-Framework@main`，`dpolicy`） | `dpolicy.rsi` |
 
 ## 怎么工作
@@ -20,7 +20,7 @@ dm-rsi 是一个 xtra-rsi meta loop（profile `dm`）。**观察、推理、决�
 ```
 observe   : 工作区里已有的产物、每段流程执行的状态、待审批、submodule、issue
 reasoning : 缺什么、什么过时了、哪里失败了、归哪个方向
-decision  : 下一段流程 + 参数（prepare_data / train_base / score_base / data_rsi / retrain /
+decision  : 下一段流程 + 参数（prepare_data / train_rsi / train_base / score_base / data_rsi / retrain /
             data_compare / dp_rsi / final_test），或 resume / draft_issue / wait
 action    : 执行这段流程（调 dgen / dpolicy / onejev-harness、提交 GPU 作业、登记审批）
 feedback  : 结果和 lessons；只剩人要做的事时停下

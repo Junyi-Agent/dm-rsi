@@ -68,8 +68,20 @@ def _prompt(ctx: StepContext, skill: Path, task: str, writes: Path) -> str:
     )
 
 
-def judge(ctx: StepContext, *, direction: str, task: str, writes: Path) -> Payload:
-    """在流程目录里跑一次判断会话，返回结果摘要（也写进步骤目录的 ``agent-<n>.json``）。"""
+def judge(  # noqa: PLR0913 -- 都是会话的组成部分，keyword-only
+    ctx: StepContext,
+    *,
+    direction: str,
+    task: str,
+    writes: Path,
+    reads: list[Path] | None = None,
+    allow_empty: bool = False,
+) -> Payload:
+    """在流程目录里跑一次判断会话，返回结果摘要（也写进步骤目录的 ``agent-<n>.json``）。
+
+    ``reads``：sub-RSI 包以外还要读的目录。``allow_empty``：不写文件也是合法结论（例如"不再提候选"）。
+    ``writes`` 总是最后一个 ``--add-dir``。
+    """
     d = ctx.cfg.direction(direction)
     pkg = d.package_dir(ctx.cfg.root)
     if pkg is None:
@@ -79,7 +91,7 @@ def judge(ctx: StepContext, *, direction: str, task: str, writes: Path) -> Paylo
     writes.mkdir(parents=True, exist_ok=True)
     argv = claude_argv(
         _prompt(ctx, pkg / "SKILL.md", task, writes),
-        add_dirs=[pkg, writes],
+        add_dirs=[pkg, *(reads or []), writes],
         model=cast("str | None", ctx.param("agent_model")),
         budget_usd=float(cast("float", ctx.param("agent_budget_usd", 2.0))),
     )
@@ -110,7 +122,7 @@ def judge(ctx: StepContext, *, direction: str, task: str, writes: Path) -> Paylo
         msg = f"agent 写进了只读的 submodule：{[(s.path, s.dirty) for s in dirty]}"
         raise AgentError(msg)
     new = sorted({p.name for p in writes.glob("*")} - before)
-    if not new:
+    if not new and not allow_empty:
         msg = f"agent 没有在 {writes} 写任何文件，见 {log}"
         raise AgentError(msg)
     return {

@@ -17,6 +17,8 @@ if TYPE_CHECKING:
 # 流程名 → {模板: 实现种类}；None 表示这个模板不需要这一段
 FLOWS: dict[str, dict[str, str | None]] = {
     "prepare_data": {"synthetic": "synthetic.make_data", "elliptic": "elliptic.build_data"},
+    # Training RSI 选训练方案（方案 A）；合成模板不训练模型，不需要
+    "train_rsi": {"synthetic": None, "elliptic": "trsi.rsi"},
     "train_base": {"synthetic": "synthetic.score", "elliptic": "elliptic.train"},
     "score_base": {"synthetic": None, "elliptic": "elliptic.score"},
     "data_rsi": {"synthetic": "dgen.rsi", "elliptic": "dgen.rsi"},
@@ -29,6 +31,7 @@ FLOWS: dict[str, dict[str, str | None]] = {
 # 决策可以给的参数（其余的由模板默认值决定，决策改不了）
 ARGS: dict[str, tuple[str, ...]] = {
     "prepare_data": ("train_sub",),
+    "train_rsi": ("judge", "train_gpu_ids", "gpu_hours", "max_candidates"),
     "train_base": ("train_gpus",),
     "score_base": (),
     "data_rsi": ("judge", "new_recipes", "max_arms"),
@@ -57,6 +60,7 @@ TEMPLATES: dict[str, Payload] = {
     "elliptic": {
         "params": {"judge": "agent", "gpu_backend": "xtrah200", "seed": 0},
         "flows": {
+            "train_rsi": {"train_gpu_ids": [0, 1], "gpu_hours": 100, "max_candidates": 4},
             "train_base": {"model": "BASE"},
             "score_base": {"model": "BASE"},
             "data_rsi": {"spotcheck": "required"},
@@ -99,15 +103,19 @@ def template_params(template: str) -> Payload:
     return dict(cast("Payload", TEMPLATES[template]["params"]))
 
 
-def suggest(art: Payload) -> tuple[str, Payload, str] | None:  # noqa: PLR0911 -- 按流程顺序逐条检查，每条一个出口
+def suggest(art: Payload, template: str | None = None) -> tuple[str, Payload, str] | None:  # noqa: PLR0911 -- 按流程顺序逐条检查，每条一个出口
     """默认决策规则：(流程, 参数, 理由)；没有可做的就返回 None。``art`` 是工作区的产物。
 
-    只看产物，不看模板：合成模板的 train_base 一步就产出了打过分的基线（``models``），自然跳过 score_base。
+    基本只看产物：合成模板的 train_base 一步就产出了打过分的基线（``models``），自然跳过 score_base。
+    唯一看模板的是 train_rsi：模板不需要它（``FLOWS`` 里是 None）时跳过。
     """
     models = cast("dict[str, Value]", art.get("models") or {})
     arms = cast("list[Payload]", art.get("arms") or [])
     if "rows_dir" not in art:
         return "prepare_data", {}, "工作区里还没有数据"
+    needs_scheme = template is None or FLOWS["train_rsi"].get(template) is not None
+    if needs_scheme and "train_scheme" not in art and "base_model" not in art:
+        return "train_rsi", {}, "还没有训练方案：先让 Training RSI 选基座、配方和超参"
     if "base_model" not in art:
         return "train_base", {}, "还没有基线模型"
     if not models:

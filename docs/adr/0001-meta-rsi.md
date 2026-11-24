@@ -85,7 +85,7 @@ DM-RSI-Framework 按方向拆成多个 sub-RSI：Data（Bingqiao，`dgen`）、T
 用户确认的分工：**观察、推理、决策是 dm-rsi 自己的；行动执行具体的流程**（数据、训练、打分……）。原设计里流程是一个和 meta loop 平级的独立对象（按模板生成固定步骤列表，`dm-rsi run advance` 可以绕过 loop 直接推进），面板上也看不到。改为：
 
 - **工作区**（`$DMRSI_HOME/work/<id>/`）代替「流程 run」：只记录行动阶段执行过的流程段和产物，不再有固定的步骤列表。流程段之间不声明依赖，要什么产物就在工作区里找最新完成的那一份。
-- **决策选下一段流程**（`dm_rsi.flows` 的动作表：`prepare_data / train_base / score_base / data_rsi / retrain / data_compare / dp_rsi / final_test`，带参数），另有 `resume`（继续没结束的执行）、`draft_issue`、`wait`。默认规则按产物判断缺什么、什么过时；LLM 决策可以不按默认顺序（重跑、换配方、多跑几轮），但流程名和参数只能取动作表里的。同一时间只执行一段流程。
+- **决策选下一段流程**（`dm_rsi.flows` 的动作表：`prepare_data / train_rsi / train_base / score_base / data_rsi / retrain / data_compare / dp_rsi / final_test`，带参数），另有 `resume`（继续没结束的执行）、`draft_issue`、`wait`。默认规则按产物判断缺什么、什么过时；LLM 决策可以不按默认顺序（重跑、换配方、多跑几轮），但流程名和参数只能取动作表里的。同一时间只执行一段流程。
 - **行动执行这段流程**，执行过程（调用的 sub-RSI 命令、日志、作业）写进本轮的 `action.yaml` 的 `events`，viz 插件把它作为行动阶段的内部过程显示。
 - 去掉 `dm-rsi run new/advance`：流程只经由 meta loop 执行。`dm-rsi work list/show/reset` 只用来查看和重置失败的执行。
 - 同一模型重复执行 `dp_rsi` 是在同一个 dpolicy run 上多跑几轮；对比选出的模型变了才开新的 dpolicy run。
@@ -110,7 +110,12 @@ Chendie 按 Yile 的写法发布了 Training RSI：`CD22104/decision-model-train
 
 - 加为第三个 submodule `subrsi/training`（`main`，`f50c3b2`），`dm-rsi.yaml` 的 `training` 方向补全 `github_login: CD22104`、`module: trsi`。
 - 它是独立仓库、开着 issues，所以方向配置新增 `issue_repo`：给 Training 的 issue 发到 `CD22104/decision-model-training`，其余方向仍发到 `github.upstream`。去重和跟踪（`outbound`）按各方向的仓库查。
-- 流程里暂时还没有调 `trsi`，`elliptic.train` / `elliptic.retrain` 仍由 dm-rsi 直接调 onejev-harness。换成调 `trsi` 的位置待定。
+- 位置定为**方案 A**（用户 2026-11-24 选定）：Elliptic 模板在 `prepare_data` 之后加流程 `train_rsi`（`trsi.rsi`，`steps/trainrsi.py`），Training RSI 选出的方案作为产物 `train_scheme`（基座、配方、带原因的 overrides），之后的 `train_base` 和 `retrain` 都按它训练。没有方案时（合成模板、旧工作区）用原来的兜底配方。
+  - 对比是公平的：基线和 Data RSI 各组数据用同一个方案、在同样的 4 万行加各自的生成数据上训练。方案本身是 trsi 在完整训练集上选的（和 Chendie 的环境、Decision Policy 一致）。
+  - trsi 的每次 `launch` 前，dm-rsi 登记一个 `train` 审批（保持"每次训练都确认"），批准后由 trsi 在本机 `ojh run`。不经 taskmgr，因为 trsi 自己挑卡（`train_gpu_ids`），harness 也会检查卡是否空闲。
+  - 一次 `run_step` 推进一步：`collect` → `next` → 启动放得下的训练（每个先审批）→ 没有在跑的就让判断环节写候选（`judge: agent` 时起 agent 会话，按 trsi 的 SKILL.md 第 4–5 步）。`next` 说 STOP、候选数到 `max_candidates`、或者判断环节不再提候选时结束，产出 `train_scheme`、`train_checkpoints`、`train_rsi_report`。
+  - trsi 的记录（`archive.jsonl`、`incumbent.yaml`、`trials/`）dm-rsi 只读，所有改动都经 trsi 的命令。`out_dir` 默认是 `$DMRSI_HOME/trsi/elliptic-txhist`，不同工作区之间共用试验，同一个方案不会重复训练。
+  - 训练配置去掉了 `fields.text`。有这个字段时，harness 收尾会占着卡在 CPU 上训文本基线，被 xtrah200 的显卡看门狗杀掉（Chendie 的 `reference/lessons.md`）。
 
 接入时发现的差异：
 

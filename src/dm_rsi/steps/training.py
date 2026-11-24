@@ -1,4 +1,7 @@
-"""Elliptic++ × elephant-1 的真实流程步骤（ADR 0001 P2）。Training 方向还没有 sub-RSI，dm-rsi 直接调度 onejev-harness。
+"""Elliptic++ × elephant-1 的真实流程步骤（ADR 0001 P2）。
+
+训练方案由 Training RSI 选（``trsi.rsi``，见 :mod:`dm_rsi.steps.trainrsi`），这里按选出的方案
+调度 onejev-harness 训练基线和 Data RSI 的各组数据（没有方案时用兜底配方）。
 
 复用 ``subrsi/decision-policy/pipelines/elliptic_elephant/`` 的脚本（只读），环境变量由 dm-rsi 拼出来，
 所有产物写在 ``$DMRSI_HOME``：
@@ -171,27 +174,54 @@ def machine_yaml(ctx: StepContext) -> Path:
     return path
 
 
+def scheme(ctx: StepContext) -> tuple[str, str, Payload, int, str]:
+    """训练方案：(基座, 配方, overrides, 卡数, 说明)。
+
+    有 Training RSI 选出的 ``train_scheme`` 就用它（方案 A）；没有时用 Decision Policy 仓库里的
+    ``elephant_lora_ddp_2g.yaml``（超参没调过，只是兜底）。
+    """
+    sch = ctx.ws.latest_output("train_scheme")
+    if isinstance(sch, dict):
+        recipe = str(sch["recipe"])
+        gpus = int(cast("int", yamlfile.read(Path(recipe)).get("gpus", 1)))
+        ovs = cast("Payload", sch.get("overrides") or {})
+        label = f"Training RSI 方案 {sch.get('candidate_id')}：{sch['base']} {Path(recipe).stem}"
+        if ovs:
+            vals = ", ".join(
+                f"{k}={cast('Payload', o).get('value')}" for k, o in sorted(ovs.items())
+            )
+            label += f"（{vals}）"
+        return str(sch["base"]), recipe, ovs, gpus, label
+    recipe = str(_pipeline_script(ctx.cfg, "recipes/elephant_lora_ddp_2g.yaml"))
+    gpus = int(cast("int", ctx.param("train_gpus", 2)))
+    base = str(ctx.param("base", "elephant-1"))
+    return base, recipe, {}, gpus, f"{base} LoRA（没有 Training RSI 方案，用兜底配方）"
+
+
 def _exp_yaml(ctx: StepContext, model: str, train: str) -> tuple[Path, str]:
     p = paths(ctx.cfg)
     name = f"{ctx.ws.id}-{model}".lower()
     path = p["OJH_HOME"] / "work" / name / "exp.yaml"
     if not path.is_file():
+        base, recipe, overrides, gpus, _ = scheme(ctx)
         yamlfile.write(
             path,
             {
                 "name": name,
-                "base": str(ctx.param("base", "elephant-1")),
-                "recipe": str(_pipeline_script(ctx.cfg, "recipes/elephant_lora_ddp_2g.yaml")),
-                "gpus": int(cast("int", ctx.param("train_gpus", 2))),
+                "base": base,
+                "recipe": recipe,
+                "gpus": gpus,
                 "data": {
                     "adapter": "onejev_rows",
                     "train": train,
                     "eval": {"val": {"train_labels": str(ctx.find_output("val_sub"))}},
                 },
-                "fields": {"label": "target.yes", "group": "meta.state_id", "text": "state_json"},
+                # 不写 fields.text：有它时 harness 收尾会占着卡在 CPU 上训文本基线，
+                # 被 xtrah200 的显卡看门狗杀掉（Training RSI 的 lessons.md）
+                "fields": {"label": "target.yes", "group": "meta.state_id"},
                 "evaluator": {"type": "binary_decision", "gate": True},
                 "seeds": [int(cast("int", ctx.param("seed", 0)))],
-                "overrides": {},
+                "overrides": overrides,
             },
         )
     return path, name
@@ -212,12 +242,13 @@ def train_model(ctx: StepContext, model: str, train: str) -> tuple[StepState, st
     """训练一个模型。返回 (状态, 说明, run_dir)。状态不是 DONE 时调用方原样返回。"""
     p = paths(ctx.cfg)
     exp, name = _exp_yaml(ctx, model, train)
-    gpus = int(cast("int", ctx.param("train_gpus", 2)))
+    gpus = int(cast("int", yamlfile.read(exp).get("gpus", 2)))
+    label = scheme(ctx)[4]
     jkey = f"train_job/{model}"
     job = _job(ctx, jkey)
     a = ctx.gate(
         Kind.TRAIN,
-        f"训练 {name}（elephant-1 LoRA，{gpus} 卡，约 2.4 GPU 小时）",
+        f"训练 {name}（{label}，{gpus} 卡）",
         f"train/{model}",
         {
             "exp": str(exp),
@@ -226,7 +257,7 @@ def train_model(ctx: StepContext, model: str, train: str) -> tuple[StepState, st
         },
         explain=(
             f"要在后端 {ctx.param('gpu_backend', 'xtrah200')} 上训练模型 {model}"
-            f"（流程 {ctx.ws.id}，elephant-1 LoRA，{gpus} 张卡，按以往约 2.4 GPU 小时）。\n"
+            f"（流程 {ctx.ws.id}，{label}，{gpus} 张卡）。\n"
             f"训练数据：{train}\n实验配置：{exp}\n"
             "为什么问你：训练占共享 GPU 时间，ADR 0001 规定每次训练都要人确认。\n"
             "批准：dm-rsi 提交作业，训练结束后自动合并 LoRA、打分，流程继续。\n"

@@ -81,7 +81,7 @@ upstream 是 observe 的输出：`workspace`、`template`、`artifacts`（工作
 | `open_execution` | 某次执行 pending / running，或 blocked 但审批已有结果（带 `step`） | `resume` |
 | `waiting_human` | 某次执行 blocked，审批还在 pending | `wait` |
 | `flow_failed` | 某个流程最近一次执行失败（带 `owner`：data / decision-policy / training；dm-rsi 自己的问题时为 null） | `draft_issue`（owner 非空），否则 `wait` |
-| `next_flow` | 按产物看缺哪一段（带 `flow`、`args`）：没数据 → `prepare_data`；没基线 → `train_base`；基线没打分 → `score_base`；没有新训练数据 → `data_rsi`；有配方没重训 → `retrain`；有模型没对比 → `data_compare`；对比选出的模型和 DP 用的不同 → `dp_rsi`；都齐了 → `final_test` | `flow` |
+| `next_flow` | 按产物看缺哪一段（带 `flow`、`args`）：没数据 → `prepare_data`；没有训练方案（elliptic 模板）→ `train_rsi`；没基线 → `train_base`；基线没打分 → `score_base`；没有新训练数据 → `data_rsi`；有配方没重训 → `retrain`；有模型没对比 → `data_compare`；对比选出的模型和 DP 用的不同 → `dp_rsi`；都齐了 → `final_test` | `flow` |
 | `blocked_by_failure` | 下一段应该做的流程上次失败了 | `wait` |
 | `finished` | 都完成了 | `wait` |
 | `submodule_dirty` / `submodule_behind` / `inbox_issue` | 见名字 | `wait` |

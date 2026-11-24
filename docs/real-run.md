@@ -12,6 +12,7 @@ dm-rsi 的 `elliptic` 模板已经写好（`src/dm_rsi/steps/training.py`），�
 | 4 | Elliptic++ 原始数据和 OneJev 行 | `$DMRSI_HOME/elliptic/data/onejev/addr_txhist_noul/*.jsonl` | `01_build_data.sh` 结束时打印各文件行数；按 `DATA_PIPELINE.md` 第 5 节核对 split id | `elliptic.build_data` |
 | 5 | 数据环境（Python 3.11 + `requirements_jev.txt`） | `$DMRSI_HOME/jev-venv` | `$DMRSI_HOME/jev-venv/bin/python -c "import pandas"` | `01_build_data.sh`、`04_policy_features.py` |
 | 6 | GPU 后端：gpu-taskmgr 的 `task` CLI，服务器 `xtrah200` 已登记 | `~/.local/bin/task`、`~/.taskmgr/machines.json` | `task host ping xtrah200` 有应答 | `elliptic.train`、`elliptic.score` |
+| 7 | Training RSI：submodule `subrsi/training`；harness 能在本机 `ojh run`（trsi 不经 taskmgr，自己挑卡） | `subrsi/training/rsi_skills/training` | `git submodule status subrsi/training` 没有 `-` 前缀；`ojh doctor` 通过、`ojh fetch-base elephant-1` 做过 | `trsi.rsi`（流程 `train_rsi`） |
 
 `elliptic.build_data` 会在 1 缺失时停下并提示；2、4、5 缺失时它会尝试自己跑 `setup.sh` 和 `01_build_data.sh`。6 没有时，提交训练会报 `task` 找不到。
 
@@ -20,7 +21,8 @@ dm-rsi 的 `elliptic` 模板已经写好（`src/dm_rsi/steps/training.py`），�
 ## 注意
 
 - xtrah200 有 GPU 看门狗：一个用户所有 GPU 进程 20 分钟内的总 duty 低于 10% 会被强制登出。环境准备阶段不要在 GPU 上跑短进程（`ojh doctor` 只查环境，不占卡）。
-- 训练前 dm-rsi 会登记 `train` 审批，每次都要人在 `dm-rsi pending` 里确认。
+- 训练前 dm-rsi 会登记 `train` 审批，每次都要人在 `dm-rsi pending` 里确认。Training RSI 的每个种子也是一次训练：起点 3 个种子、每个候选的探针和补的种子，各批一次。
+- `train_rsi` 默认用 0、1 号卡（`train_gpu_ids`）、预算 100 卡时、最多 4 个候选。卡被别人占着时，决策可以改 `train_gpu_ids`（或者在审批时拒绝、改参数重开）。起点的一个种子在 H200 上约 3–4 小时。
 - 两个方向的行格式不一致（ADR 0001「实施中发现的契约差异」）：`dgen check` 在真实数据上第一次运行时要看它是否通过。
 
 ## 交给 agent 准备
@@ -43,5 +45,5 @@ EOF
 
 ```bash
 DMRSI_TEMPLATE=elliptic DMRSI_WORKSPACE=ell-1 uv run rsi run --profile dm --iterations 20 --run-dir $DMRSI_HOME/loops/ell-1
-uv run dm-rsi pending      # 建完数据后停在第一次训练的审批
+uv run dm-rsi pending      # 建完数据后停在 Training RSI 第一次训练（起点种子 0）的审批
 ```

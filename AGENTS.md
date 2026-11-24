@@ -5,7 +5,7 @@ DM-RSI-Framework 的 meta RSI：统一入口，调度各方向的 sub-RSI（Data
 ## 布局
 
 - `subrsi/decision-policy`、`subrsi/data`：sub-RSI 的 submodule，**只读**。不在里面改文件、不提交、不 `pip install -e`。升级 = 移动 submodule 指针。
-- `src/dm_rsi/`：`config.py`（`dm-rsi.yaml`）、`approvals.py`（审批队列）、`issues.py` + `github.py`（issue 双向流）、`workspace.py`（工作区：行动阶段执行过的流程段、产物、审批）、`flows.py`（流程动作表、参数白名单、默认决策规则）、`steps/`（各流程的实现：`synthetic`、`dgen`、`dpolicy`、`training`（Elliptic 训练/打分）、`final`、`judge`）、`backends/`（`local`、`taskmgr`、`ssh`、`pbs`）、`agent.py`（判断步骤的 claude 会话）、`profile.py`（xtra-rsi profile `dm`，meta loop：观察、推理、决策由 dm-rsi 做，行动执行流程）、`viz.py`、`cli.py`。
+- `src/dm_rsi/`：`config.py`（`dm-rsi.yaml`）、`approvals.py`（审批队列）、`issues.py` + `github.py`（issue 双向流）、`workspace.py`（工作区：行动阶段执行过的流程段、产物、审批）、`flows.py`（流程动作表、参数白名单、默认决策规则）、`steps/`（各流程的实现：`synthetic`、`dgen`、`dpolicy`、`trainrsi`（Training RSI：选训练方案）、`training`（Elliptic 训练/打分，按选出的方案）、`final`、`judge`）、`backends/`（`local`、`taskmgr`、`ssh`、`pbs`）、`agent.py`（判断步骤的 claude 会话）、`profile.py`（xtra-rsi profile `dm`，meta loop：观察、推理、决策由 dm-rsi 做，行动执行流程）、`viz.py`、`cli.py`。
 - `harness/<stage>/`：meta loop 五个阶段的规则。只改 `AGENTS.local.md`，然后 `uv run rsi sync`。
 - `.claude/jy-skills`：Junyi-Agent/skills（submodule），`.claude/skills/jy-*` 是软链接。
 - 运行产物、数据、分数、审批队列都在 `$DMRSI_HOME`（默认 `/ssd1/junyi/jev/dmrsi`），不进 git。
