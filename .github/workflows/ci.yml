@@ -19,17 +19,6 @@ jobs:
         with:
           enable-cache: true
 
-      # xtra-rsi 是私有仓库：仓库 secret XTRA_RSI_TOKEN 是一个只读 Junyi-Agent/xtra-rsi 的 fine-grained token
-      - name: 允许读取 xtra-rsi
-        env:
-          TOKEN: ${{ secrets.XTRA_RSI_TOKEN }}
-        run: |
-          if [ -z "$TOKEN" ]; then
-            echo "::error::缺少仓库 secret XTRA_RSI_TOKEN（只读 Junyi-Agent/xtra-rsi 的 token），uv sync 拉不到 xtra-rsi"
-            exit 1
-          fi
-          git config --global url."https://x-access-token:${TOKEN}@github.com/Junyi-Agent/xtra-rsi".insteadOf "https://github.com/Junyi-Agent/xtra-rsi"
-
       - run: uv sync --locked
       - run: uv run ruff format --check src tests
       - run: uv run ruff check src tests

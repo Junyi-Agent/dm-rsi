@@ -63,7 +63,7 @@ uv run dm-rsi pending
 
 - 已吸收：交接时重算 val 指标（`data_compare`）、train_rsi 的预检查和重试、版本登记和停止条件（`versions.py`，`final_test` 测当前最佳版本）。见 ADR 0001「修订（2026-11-24，第二次）」。
 - 待定：val 和 dm-rsi 自己的 evalset 分开（要和 Bingqiao、Yile 对齐契约）。
-- 交接集中到 `steps/handoff.py`，正式交接文件格式见 `docs/handoff.md`；CI 需要仓库 secret `XTRA_RSI_TOKEN`。
+- 交接集中到 `steps/handoff.py`，正式交接文件格式见 `docs/handoff.md`。
 - 第一次真实运行时盯：`dgen compare` 的 val 指标和 dm-rsi 重算的是否一致（`dgen` 配置里的 `val_split` 如果不是 `val`，重算会读错文件）。
 
 ### 5. 可以和各方向沟通的（都要先进审批队列，用户确认后才发）
