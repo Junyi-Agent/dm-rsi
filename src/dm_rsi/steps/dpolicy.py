@@ -13,7 +13,7 @@ import shutil
 import subprocess
 from typing import TYPE_CHECKING, cast
 
-from dm_rsi import subenv, yamlfile
+from dm_rsi import subenv, versions, yamlfile
 from dm_rsi.steps import judge
 from dm_rsi.workspace import Outcome, StepState, step_kind
 
@@ -219,4 +219,10 @@ def rsi(ctx: StepContext) -> Outcome:
         pick = base / "r0" / "consensus.yaml"
         outputs["consensus"] = str(pick) if pick.is_file() else None
         note += "，共识：" + ("有" if pick.is_file() else "没有候选过半通过")
+    v = versions.register(ctx.ws, ctx.step.name, outputs)
+    note += f"；版本判定：{v['decision']}" + (f" → {v['version']}" if v.get("version") else "")
+    note += f"（{v['reason']}）"
+    outputs["version_decision"] = cast(
+        "Value", {k: v[k] for k in ("decision", "version", "reason")}
+    )
     return Outcome(StepState.DONE, note, outputs=outputs)

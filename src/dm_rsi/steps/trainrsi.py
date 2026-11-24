@@ -11,6 +11,10 @@
    探针通过后的其余种子）。
 3. 每次启动训练前登记 ``train`` 审批（ADR 0001：每次训练都要人确认），批准后 ``trsi launch``（本机 ``ojh run``，
    立即返回）。卡从 ``train_gpu_ids`` 里挑没被本流程占用的。
+   新候选的探针在登记审批**之前**先用 trsi 自己的规则检查（:func:`_precheck`：在不在 space 里、是不是死路），
+   不合格的候选记下原因、跳过（算一次尝试，计入 ``max_candidates``），下次判断环节会看到原因，不让整段失败。
+   失败的试验按 ``max_retries`` 重试（trsi 对 failed 的试验用同一条 ``launch`` 重跑），每次重试也要审批；
+   重试用完仍失败，整段才失败。（ADR 0001，2026-11-24 第二次修订，借鉴 Borui 的「每轮尝试上限」。）
 4. 没有在跑、也没有要启动的：``next`` 说 STOP、候选数到了 ``max_candidates``、或判断环节不再提新候选时结束，
    ``trsi report``；否则判断环节（``judge: agent`` 时起一个 agent 会话，按 trsi 的 SKILL.md 第 4–5 步诊断、
    写 1–2 个候选）写进 ``proposals/``。
@@ -181,8 +185,17 @@ def _recipe_gpus(recipe: Path) -> int:
     return int(cast("int", _load(recipe).get("gpus", 1)))
 
 
-def _item(label: str, proposal: str | None, seed: int, why: str, cand: Value) -> dict[str, Value]:
-    return {"label": label, "proposal": proposal, "seed": seed, "why": why, "cand": cand}
+def _item(  # noqa: PLR0913 -- 一次启动的全部描述
+    label: str, proposal: str | None, seed: int, why: str, cand: Value, *, key: str | None = None
+) -> dict[str, Value]:
+    return {
+        "label": label,
+        "proposal": proposal,
+        "seed": seed,
+        "why": why,
+        "cand": cand,
+        "key": key or f"launch/{label}/s{seed}",
+    }
 
 
 def _start_seeds(rec: Records) -> list[dict[str, Value]]:
@@ -223,9 +236,86 @@ def _more_seeds(rec: Records) -> list[dict[str, Value]]:
     return out
 
 
+_PRECHECK = r"""
+import json, sys
+from pathlib import Path
+from trsi.candidate import dead_ends, load_proposal, outside_space
+from trsi.config import load_run
+run = load_run(Path(sys.argv[1]))
+try:
+    c, _ = load_proposal(Path(sys.argv[2]), run)
+except Exception as e:  # 候选文件本身不合法
+    print(json.dumps([f"候选文件不合法：{type(e).__name__}: {e}"]))
+    raise SystemExit(0)
+probs = [f"超出批准的 space：{x}" for x in outside_space(c, run.space)]
+probs += [f"死路：{x}" for x in dead_ends(c, run.space)]
+print(json.dumps(probs))
+"""
+
+
+def _precheck(ctx: StepContext, run_path: Path, proposal: Path) -> list[str]:
+    """用 trsi 自己的规则检查新候选（不启动、不写 trsi 的记录），返回问题列表。"""
+    out = subenv.run_code(
+        ctx.cfg, ctx.cfg.direction(DIRECTION), _PRECHECK, [str(run_path), str(proposal)]
+    )
+    return [str(x) for x in cast("list[Value]", json.loads(out))]
+
+
+def _refuse_bad_probes(
+    ctx: StepContext, run_path: Path, probes: list[dict[str, Value]]
+) -> list[dict[str, Value]]:
+    """审批之前筛掉 trsi 会拒绝的候选：记进 ``refused``，算一次尝试（进 ``launched_proposals``）。"""
+    launched = cast("list[Value]", ctx.data.setdefault("launched_proposals", []))
+    refused = cast("dict[str, Value]", ctx.data.setdefault("refused", {}))
+    ok: list[dict[str, Value]] = []
+    for item in probes:
+        probs = _precheck(ctx, run_path, Path(str(item["proposal"])))
+        if probs:
+            refused[str(item["label"])] = cast("Value", probs)
+            launched.append(str(item["label"]))
+        else:
+            ok.append(item)
+    return ok
+
+
+def _retries(ctx: StepContext, rec: Records) -> tuple[list[dict[str, Value]], list[str]]:
+    """失败的试验：还能重试的 → 启动项；重试用完的 → 说明。"""
+    max_retries = int(cast("int", ctx.param("max_retries", 1)))
+    proposals = {str(e["candidate"]): str(e["proposal"]) for e in rec.of("propose")}
+    todo: list[dict[str, Value]] = []
+    exhausted: list[str] = []
+    for tid, t in rec.trials.items():
+        if t.get("status") != "failed":
+            continue
+        err = cast("dict[str, Value]", t.get("result") or {}).get("error")
+        attempts = int(cast("int", t.get("attempts") or 1))
+        if attempts > max_retries:
+            exhausted.append(f"{tid}（{attempts} 次都失败，最后一次：{err}）")
+            continue
+        cid = str(t.get("candidate_id"))
+        proposal = None if cid == rec.start_cid else proposals.get(cid)
+        if proposal is None and cid != rec.start_cid:
+            exhausted.append(f"{tid}（找不到它的候选文件，不能重试：{err}）")
+            continue
+        label = "start" if proposal is None else Path(proposal).name
+        why = (
+            f"重试：这个试验上次失败（{err}），第 {attempts + 1} 次尝试，最多 {max_retries + 1} 次。"
+            "先看 run 目录的 DONE、runner.log，确认是偶发问题（OOM、卡被占、节点故障）再批；"
+            "如果是配置本身的问题，重试也会失败，拒绝即可"
+        )
+        cand = t.get("candidate") or (rec.run["start"] if proposal is None else None)
+        seed = int(cast("int", t["seed"]))
+        todo.append(
+            _item(label, proposal, seed, why, cand, key=f"retry/{label}/s{seed}/{attempts}")
+        )
+    return todo, exhausted
+
+
 def _launches(ctx: StepContext, rec: Records, run_path: Path) -> list[dict[str, Value]]:
-    """还要启动的训练：起点的种子 → 新候选的探针 → 探针通过的候选的其余种子。"""
-    out = [*_start_seeds(rec), *_new_probes(ctx, rec), *_more_seeds(rec)]
+    """还要启动的训练：失败试验的重试 → 起点的种子 → 新候选的探针 → 探针通过的候选的其余种子。"""
+    retries, _ = _retries(ctx, rec)
+    probes = _refuse_bad_probes(ctx, run_path, _new_probes(ctx, rec))
+    out = [*retries, *_start_seeds(rec), *probes, *_more_seeds(rec)]
     for item in out:
         recipe = Path(str(cast("dict[str, Value]", item["cand"])["recipe"]))
         item["recipe"] = str(
@@ -263,7 +353,7 @@ def _launch(
     a = ctx.gate(
         Kind.TRAIN,
         f"Training RSI 训练 {item['label']} 种子 {seed}（{cand.get('base')}，卡 {gpus}）",
-        f"launch/{item['label']}/s{seed}",
+        str(item["key"]),
         {
             "run": str(run_path),
             "proposal": cast("Value", item["proposal"]),
@@ -278,8 +368,12 @@ def _launch(
             f"范围（trsi 只接受范围内的候选）：{run_path} 的 space。\n"
             "为什么问你：训练占共享 GPU 时间，ADR 0001 规定每次训练都要人确认。\n"
             "批准：dm-rsi 运行 trsi launch（ojh run 在 tmux 里训练，立即返回），之后每轮 collect / next。\n"
-            "拒绝：这段流程失败、停下；可以改参数（train_gpu_ids、gpu_hours）重开。\n"
-            "建议：先 nvidia-smi 确认这几张卡空闲（harness 也会检查），方案的理由站得住再批。"
+            + (
+                "拒绝：不再重试，这段流程失败、停下。\n"
+                if str(item["key"]).startswith("retry/")
+                else "拒绝：这段流程失败、停下；可以改参数（train_gpu_ids、gpu_hours）重开。\n"
+            )
+            + "建议：先 nvidia-smi 确认这几张卡空闲（harness 也会检查），方案的理由站得住再批。"
         ),
     )
     if a.state not in (State.APPROVED, State.DONE):
@@ -288,8 +382,13 @@ def _launch(
     args += ["--start"] if item["proposal"] is None else [str(item["proposal"])]
     args += ["--seed", str(seed), "--gpus", ",".join(str(g) for g in gpus)]
     out = _trsi(ctx, f"launch-{item['label']}-s{seed}", *args)
-    if item["proposal"] is not None and seed == Records(run_path).seeds[0]:
-        cast("list[Value]", ctx.data["launched_proposals"]).append(str(item["label"]))
+    launched = cast("list[Value]", ctx.data.setdefault("launched_proposals", []))
+    if (
+        item["proposal"] is not None
+        and seed == Records(run_path).seeds[0]
+        and str(item["label"]) not in launched
+    ):
+        launched.append(str(item["label"]))
     if a.state is State.APPROVED:
         ctx.store.mark(a.id, ok=True, result={"stdout": out[-2000:]})
     return StepState.RUNNING
@@ -318,6 +417,9 @@ def _finish(ctx: StepContext, run_path: Path, why: str) -> Outcome:
         "note": cast("Value", cand.get("note") or ""),
         "is_start": cid == rec.start_cid,
     }
+    refused = cast("dict[str, Value]", ctx.data.get("refused") or {})
+    if refused:
+        why += f"；{len(refused)} 个候选被 trsi 的规则拒绝：{', '.join(refused)}"
     return Outcome(
         StepState.DONE,
         f"训练方案定为 `{cid}`（{cand['base']} {Path(str(cand['recipe'])).stem}）：{why}",
@@ -346,12 +448,23 @@ def _propose(ctx: StepContext, rec: Records) -> list[str]:
             f"{', '.join(reads) or '（无）'}（每个种子的 RESULT.md）。按 SKILL.md 主流程第 4–5 步：先写诊断，"
             f"再在 {proposals} 写 1–2 个候选 YAML（带 note 和 prediction，必须在 run.yaml 的 space 里）。"
             "如果剩下的问题都属于数据或评测、不值得再试训练方案，就不写文件，在回答里说明。只写候选，不运行任何命令。"
+            + _refused_note(ctx)
         ),
         writes=proposals,
         reads=[rec.home, *map(Path, reads)],
         allow_empty=True,
     )
     return cast("list[str]", res.get("files") or [])
+
+
+def _refused_note(ctx: StepContext) -> str:
+    refused = cast("dict[str, list[str]]", ctx.data.get("refused") or {})
+    if not refused:
+        return ""
+    lines = "；".join(f"{k}：{'、'.join(v)}" for k, v in refused.items())
+    return (
+        f"\n之前写的这些候选被 trsi 的规则拒绝了（没有训练，但算一次尝试），别再写同样的：{lines}"
+    )
 
 
 def _refresh(ctx: StepContext, run_path: Path) -> str:
@@ -367,17 +480,15 @@ def _refresh(ctx: StepContext, run_path: Path) -> str:
     return nxt
 
 
-def _failed(rec: Records) -> Outcome | None:
-    failed = {tid: t for tid, t in rec.trials.items() if t.get("status") == "failed"}
-    if not failed:
+def _failed(ctx: StepContext, rec: Records) -> Outcome | None:
+    """重试用完仍失败的试验 → 整段失败。还能重试的由 :func:`_retries` 排进启动列表。"""
+    _, exhausted = _retries(ctx, rec)
+    if not exhausted:
         return None
-    errs = "; ".join(
-        f"{tid}: {cast('dict[str, Value]', t.get('result') or {}).get('error')}"
-        for tid, t in failed.items()
-    )
     return Outcome(
         StepState.FAILED,
-        f"训练失败：{errs}（看 run 目录的 DONE、runner.log；修好后 dm-rsi work reset 重跑）",
+        f"训练失败，重试用完（max_retries）：{'; '.join(exhausted)}"
+        "（看 run 目录的 DONE、runner.log；修好后 dm-rsi work reset 重跑）",
     )
 
 
@@ -412,7 +523,7 @@ def rsi(ctx: StepContext) -> Outcome:  # noqa: PLR0911 -- 每个出口对应一�
     run_path = write_configs(ctx)
     nxt = _refresh(ctx, run_path)
     rec = Records(run_path)
-    failed = _failed(rec)
+    failed = _failed(ctx, rec)
     if failed is not None:
         return failed
     stop = "STOP" in nxt

@@ -54,11 +54,16 @@ uv run dm-rsi pending
 
 ### 4. 已知的设计缺口（可以先做，不依赖环境）
 
-- **agent 写的候选超出 trsi 的 space**：`trsi launch` 拒绝 → 整段 `train_rsi` 失败 → 会起草发给 Training 的 issue，但这是 dm-rsi 的 agent 写错了，不是 Chendie 的问题。应该把被拒的候选记下来跳过（或让 agent 重写），不让整段失败。
-- **trsi 的训练失败**：现在任何一个试验 failed 整段就失败，只能 `dm-rsi work reset` 后重来。trsi 支持用同一条命令重跑失败的试验，可以加一个"重试失败试验"的审批。
+- ~~agent 写的候选超出 trsi 的 space~~、~~trsi 的训练失败~~：已做（ADR 0001 第二次修订：审批前预检查、`max_retries` 重试）。
 - **方案变了，基线不会重训**：`flows.suggest` 只看 `train_scheme` 是否存在。如果之后重跑 `train_rsi` 选出新方案，已有的 `base_model` / `models` 不会被判为过时。
 - **trsi 不经 taskmgr 调卡**：同一台机器上 taskmgr 的作业和 trsi 的 `ojh run` 可能抢卡（harness 会检查卡是否空闲，但两边互相看不到预约）。
 - **`tests/` 下有既有的 pyright 报错**（146 个，主要是测试里的假对象类型；`src/` 是 0）。可以清理，或者把 basedpyright 的 `include` 限定到 `src`。
+
+### 4b. 借鉴 Borui 之后（2026-11-24）
+
+- 已吸收：交接时重算 val 指标（`data_compare`）、train_rsi 的预检查和重试、版本登记和停止条件（`versions.py`，`final_test` 测当前最佳版本）。见 ADR 0001「修订（2026-11-24，第二次）」。
+- 待定：val 和 dm-rsi 自己的 evalset 分开（要和 Bingqiao、Yile 对齐契约）。
+- 第一次真实运行时盯：`dgen compare` 的 val 指标和 dm-rsi 重算的是否一致（`dgen` 配置里的 `val_split` 如果不是 `val`，重算会读错文件）。
 
 ### 5. 可以和各方向沟通的（都要先进审批队列，用户确认后才发）
 

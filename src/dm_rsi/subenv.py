@@ -108,3 +108,27 @@ def run_module(  # noqa: PLR0913 -- 都是命令的组成部分，keyword-only
         msg = f"{module} {' '.join(args[:1])} 失败（{proc.returncode}），日志 {log_dir}/{name}.err：\n{tail}"
         raise SubRsiError(msg)
     return proc.stdout
+
+
+def run_code(
+    cfg: Config, direction: Direction | None, code: str, args: list[str], *, timeout: int = 600
+) -> str:
+    """在 sub-RSI 的 venv 里跑一小段 Python（``direction`` 给了就能 import 它的包），返回 stdout。
+
+    给 dm-rsi 自己的检查用：读 sub-RSI 的产物、调它公开的函数，但不改它的任何文件。
+    """
+    pkg = direction.package_dir(cfg.root) if direction is not None else None
+    env = {**base_env(pkg if pkg is not None else cfg.home), "PATH": "/usr/bin:/bin"}
+    proc = subprocess.run(
+        [str(python(cfg)), "-c", code, *args],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+        timeout=timeout,
+    )
+    if proc.returncode != 0:
+        tail = "\n".join(proc.stderr.strip().splitlines()[-15:])
+        msg = f"sub-RSI venv 里的检查脚本失败（{proc.returncode}）：\n{tail}"
+        raise SubRsiError(msg)
+    return proc.stdout

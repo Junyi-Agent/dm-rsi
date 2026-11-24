@@ -172,3 +172,105 @@ def test_suggest_puts_train_rsi_before_training_only_for_elliptic():
     assert flows.suggest({"rows_dir": "/r"}, "elliptic")[0] == "train_rsi"
     assert flows.suggest({"rows_dir": "/r"}, "synthetic")[0] == "train_base"
     assert flows.suggest({"rows_dir": "/r", "train_scheme": {}}, "elliptic")[0] == "train_base"
+
+
+# ---- 借鉴 Borui 的「尝试上限」（ADR 0001，2026-11-24 第二次修订）-------------------------------------------------
+
+FAKE_CLAUDE_BAD_THEN_GOOD = r"""#!__PY__
+import json, sys
+from pathlib import Path
+args = sys.argv[1:]
+dirs = [args[i + 1] for i, a in enumerate(args) if a == "--add-dir"]
+pkg, writes = Path(dirs[0]), Path(dirs[-1])
+recipe = pkg / "configs/recipes/elephant_lora_1g.yaml"
+def cand(lr, note):
+    return (f"base: elephant-1\nrecipe: {recipe}\n"
+            f"overrides:\n  onejev.lr: {{value: {lr}, reason: \"试试\"}}\n"
+            f"note: {note}\nprediction: {{auprc: 0.9, p_accept: 0.2}}\n")
+log = Path(__LOG__)
+n = len(log.read_text().splitlines()) if log.exists() else 0
+log.open("a").write(json.dumps(" ".join(args), ensure_ascii=False) + "\n")
+if n == 0:
+    (writes / "lr-3e-4.yaml").write_text(cand("3.0e-4", "超出 space"))
+elif n == 1:
+    (writes / "lr-2e-4.yaml").write_text(cand("2.0e-4", "换一个在 space 里的"))
+print(json.dumps({"result": "诊断：……", "total_cost_usd": 0.01, "is_error": False, "usage": {}}))
+"""
+
+
+def _drive(cfg, name, store, n=15):
+    states = []
+    for _ in range(n):
+        _approve_pending(store)
+        res = _step(cfg, name, store)
+        states.append(res["state"])
+        if res["state"] in ("done", "failed"):
+            break
+    return res, states
+
+
+def test_out_of_space_candidate_is_skipped_before_approval_and_agent_is_told(
+    cfg_with_env, fake_ojh, tmp_path, monkeypatch
+):
+    log = tmp_path / "claude-calls.jsonl"
+    claude = tmp_path / "claude"
+    claude.write_text(
+        FAKE_CLAUDE_BAD_THEN_GOOD.replace("__PY__", sys.executable).replace(
+            "__LOG__", repr(str(log))
+        )
+    )
+    claude.chmod(0o755)
+    monkeypatch.setenv("DMRSI_CLAUDE", str(claude))
+    cfg = cfg_with_env
+    name, store = _ws(cfg, fake_ojh, judge="agent")
+    res, states = _drive(cfg, name, store)
+    assert res["state"] == "done", states
+    # 超出 space 的候选没有进审批、没有训练；在 space 里的那个照常探针
+    titles = [a.title for a in store.all()]
+    assert not any("lr-3e-4" in t for t in titles)
+    assert any("lr-2e-4" in t for t in titles)
+    data = workspace.load(cfg, "ell").step_state(name)["data"]
+    assert "lr-3e-4.yaml" in data["refused"]
+    assert any("space" in r for r in data["refused"]["lr-3e-4.yaml"])
+    assert "lr-3e-4.yaml" in data["launched_proposals"]  # 算一次尝试
+    # 第二次判断时 agent 被告知哪个候选被拒、为什么
+    prompts = log.read_text().splitlines()
+    assert "lr-3e-4.yaml" not in prompts[0]
+    assert "被 trsi 的规则拒绝" in prompts[1]
+    assert "lr-3e-4.yaml" in prompts[1]
+    assert "被 trsi 的规则拒绝" in res["note"]
+
+
+def test_failed_trial_is_retried_after_approval(cfg_with_env, fake_ojh, tmp_path, monkeypatch):
+    cfg = cfg_with_env
+    monkeypatch.setenv("FAKE_OJH_QUALITY", '{"elephant-1": "fail"}')
+    name, store = _ws(cfg, fake_ojh)
+    # 起点的种子依次批准、启动，假 ojh 立刻写失败；collect 读到 failed 后先排重试，等审批
+    retry = None
+    for _ in range(10):
+        pending = [a for a in store.all() if a.state is State.PENDING]
+        retry = next((a for a in pending if "retry/" in a.fingerprint), None)
+        if retry is not None:
+            break
+        _approve_pending(store)
+        _step(cfg, name, store)
+    assert retry is not None
+    assert "重试" in retry.explain
+    assert "第 2 次尝试" in retry.explain
+    assert "拒绝：不再重试" in retry.explain
+    monkeypatch.delenv("FAKE_OJH_QUALITY")  # 偶发问题修好了
+    res, states = _drive(cfg, name, store)
+    assert res["state"] == "done", states
+    out = workspace.load(cfg, "ell").step_state(name)["outputs"]
+    assert set(out["train_checkpoints"]) == {"0", "1", "2"}
+
+
+def test_failed_trial_fails_the_flow_when_retries_run_out(cfg_with_env, fake_ojh, monkeypatch):
+    cfg = cfg_with_env
+    monkeypatch.setenv("FAKE_OJH_QUALITY", '{"elephant-1": "fail"}')
+    name, store = _ws(cfg, fake_ojh)
+    res, states = _drive(cfg, name, store)
+    assert res["state"] == "failed", states
+    assert "重试用完" in res["note"]
+    retries = [a for a in store.all() if "retry/" in a.fingerprint]
+    assert retries  # 失败后先问过一次重试

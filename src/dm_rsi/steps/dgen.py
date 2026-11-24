@@ -9,16 +9,15 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 from dm_rsi import subenv, yamlfile
 from dm_rsi.approvals import Kind, State
-from dm_rsi.steps import judge
+from dm_rsi.steps import contracts, judge
 from dm_rsi.workspace import Outcome, StepState, step_kind
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from xtra_rsi.payload import Payload, Value
 
     from dm_rsi.workspace import StepContext
@@ -218,6 +217,14 @@ def compare(ctx: StepContext) -> Outcome:
         )
     res = cast("dict[str, object]", json.loads(res_path.read_text()))
     result = cast("dict[str, object]", res["result"])
+    # 交接时重算：dgen 报告的 val 指标要和分数文件对得上，才拿它选模型
+    scores_dir = Path(str(ctx.find_output("scores_dir")))
+    verified = contracts.recompute(ctx.cfg, scores_dir, models, "val")
+    reported = {
+        str(r["run"]): {**r, "rows": result.get("n"), "pos": result.get("n_pos")}
+        for r in cast("list[dict[str, object]]", result.get("table") or [])
+    }
+    contracts.check_reported(reported, verified, f"dgen compare（{res_path}）")
     primary = str(res.get("primary", "auprc"))
     diffs = [
         d
@@ -241,6 +248,7 @@ def compare(ctx: StepContext) -> Outcome:
             "compare": str(res_path),
             "compare_summary": cast("Value", summary),
             "compared": cast("Value", sorted(models)),
-            "scores_dir": str(ctx.find_output("scores_dir")),
+            "scores_dir": str(scores_dir),
+            "verified_val": cast("Value", verified),
         },
     )

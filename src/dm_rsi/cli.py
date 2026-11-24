@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from xtra_rsi.yamlio import dump
 
-from dm_rsi import __version__, config, issues, submodules, workspace
+from dm_rsi import __version__, config, issues, submodules, versions, workspace
 from dm_rsi.approvals import ApprovalError, ApprovalStore, Kind, State
 from dm_rsi.github import GhCli, GitHub, GitHubError
 
@@ -159,7 +159,15 @@ def cmd_work_show(args: argparse.Namespace, cfg: config.Config, _gh: GitHub) -> 
         if args.outputs:
             row["outputs"] = st.get("outputs")
         rows.append(row)
-    _emit({"workspace": ws.id, "template": ws.template, "dir": str(ws.dir), "executions": rows})
+    _emit(
+        {
+            "workspace": ws.id,
+            "template": ws.template,
+            "dir": str(ws.dir),
+            "executions": rows,
+            "versions": versions.summary(ws),
+        }
+    )
     return 0
 
 

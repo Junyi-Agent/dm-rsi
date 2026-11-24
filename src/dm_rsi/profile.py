@@ -15,6 +15,9 @@ Decision Policy、final-test，见 :mod:`dm_rsi.flows`）。流程执行记在�
 - action：执行 plan；``flow`` 的名字和参数在 :data:`dm_rsi.flows.ARGS` 之外的一律拒绝。
 - feedback：这段流程的结果、lessons；``wait`` 时 ``stop: true``，loop 停下等人。
 
+版本和停止条件（:mod:`dm_rsi.versions`）：每次 ``dp_rsi`` 完成后代码判定升级 / 保留；停止条件命中后推理阶段
+直接指向 ``final_test``，行动阶段拒绝其他流程（LLM 决策也绕不过去）。
+
 工作区：``DMRSI_WORKSPACE``（默认 ``main``），模板：``DMRSI_TEMPLATE``（默认 ``synthetic``，只在新建工作区时用）。
 默认（``DMRSI_META=rules``）五个阶段都是规则实现；``DMRSI_META=llm`` 时推理和决策换成 ``claude -p``
 （读 ``harness/<stage>/AGENTS.md``），行动仍由代码执行并校验。
@@ -31,7 +34,7 @@ from xtra_rsi import Profile, Stage, StageFn
 from xtra_rsi.command_stage import CommandStage
 
 from dm_rsi import backends as backends_mod
-from dm_rsi import config, flows, issues, steps, submodules, workspace
+from dm_rsi import config, flows, issues, steps, submodules, versions, workspace
 from dm_rsi.approvals import ApprovalStore, State
 from dm_rsi.github import GhCli, GitHub, GitHubError
 
@@ -134,6 +137,7 @@ def observe(ctx: StageContext) -> Payload:
         "artifacts": {k: v if k in _KEEP else _short(v) for k, v in ws.artifacts().items()},
         "executions": execs,
         "pending": [{"id": a.id, "kind": a.kind.value, "title": a.title} for a in pending],
+        "versions": versions.summary(ws),
         "submodules": [
             s.to_dict() for s in submodules.states(cfg, online=bool(os.environ.get("DMRSI_ONLINE")))
         ],
@@ -199,6 +203,11 @@ def reasoning(ctx: StageContext) -> Payload:
     nxt = flows.suggest(
         cast("Payload", up.get("artifacts") or {}), cast("str | None", up.get("template"))
     )
+    stop = cast("Payload", up.get("versions") or {}).get("stop")
+    arts = cast("Payload", up.get("artifacts") or {})
+    if stop and "dp_headline" not in arts and (nxt is None or nxt[0] != "final_test"):
+        # 停止条件命中：不再探索，直接去 final-test（测当前最佳版本）
+        nxt = ("final_test", {}, f"停止条件：{stop}；final-test 测当前最佳版本")
     if nxt is not None:
         flow, args, why = nxt
         if flow in {str(e["flow"]) for e in failed}:
@@ -334,6 +343,10 @@ def _run_flow(plan: Payload, up: Payload, out: Payload) -> Payload:
             return {**out, "result": {"error": str(e)}}
         if ws.open_steps():
             msg = f"还有没结束的执行 {[s.name for s in ws.open_steps()]}，同一时间只执行一段流程"
+            return {**out, "result": {"error": msg}}
+        stop = versions.stop_reason(ws)
+        if stop and plan.get("flow") != "final_test":
+            msg = f"停止条件已命中（{stop}），只能执行 final_test，拒绝 {plan.get('flow')}"
             return {**out, "result": {"error": msg}}
         name = ws.add(str(plan["flow"]), kind, params).name
     else:

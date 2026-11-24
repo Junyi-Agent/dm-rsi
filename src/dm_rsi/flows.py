@@ -31,7 +31,7 @@ FLOWS: dict[str, dict[str, str | None]] = {
 # 决策可以给的参数（其余的由模板默认值决定，决策改不了）
 ARGS: dict[str, tuple[str, ...]] = {
     "prepare_data": ("train_sub",),
-    "train_rsi": ("judge", "train_gpu_ids", "gpu_hours", "max_candidates"),
+    "train_rsi": ("judge", "train_gpu_ids", "gpu_hours", "max_candidates", "max_retries"),
     "train_base": ("train_gpus",),
     "score_base": (),
     "data_rsi": ("judge", "new_recipes", "max_arms"),
@@ -60,7 +60,12 @@ TEMPLATES: dict[str, Payload] = {
     "elliptic": {
         "params": {"judge": "agent", "gpu_backend": "xtrah200", "seed": 0},
         "flows": {
-            "train_rsi": {"train_gpu_ids": [0, 1], "gpu_hours": 100, "max_candidates": 4},
+            "train_rsi": {
+                "train_gpu_ids": [0, 1],
+                "gpu_hours": 100,
+                "max_candidates": 4,
+                "max_retries": 1,
+            },
             "train_base": {"model": "BASE"},
             "score_base": {"model": "BASE"},
             "data_rsi": {"spotcheck": "required"},

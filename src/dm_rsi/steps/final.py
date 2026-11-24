@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
-from dm_rsi import subenv
+from dm_rsi import subenv, versions
 from dm_rsi.approvals import Kind, State
 from dm_rsi.steps import dgen as dgen_step
 from dm_rsi.workspace import Outcome, StepState, step_kind
@@ -38,7 +38,9 @@ def _val_summary(ctx: StepContext) -> list[str]:
         )
     if chosen == "base":
         lines.append("  Data：没有配方通过，Decision Policy 用的是基线模型")
-    arch = Path(str(ctx.find_output("dp_dir"))) / "r0" / "archive.jsonl"
+    best = versions.best(ctx.ws)
+    dp_dir = Path(str(best["dp_dir"])) if best else Path(str(ctx.find_output("dp_dir")))
+    arch = dp_dir / "r0" / "archive.jsonl"
     if arch.is_file():
         recs = [json.loads(x) for x in arch.read_text().splitlines() if x.strip()]
         base = next((r for r in recs if r.get("source") == "baseline"), None)
@@ -55,6 +57,23 @@ def _val_summary(ctx: StepContext) -> list[str]:
     return lines
 
 
+def _version_lines(ctx: StepContext) -> list[str]:
+    v = versions.summary(ctx.ws)
+    b = cast("dict[str, object] | None", v["best"])
+    if b is None:
+        return []
+    lines = [
+        (
+            f"  Decision Policy 测的是当前最佳版本 {b['version']}（模型 {b['dp_model']}，val 目标值 {float(cast('float', b['objective'])):.4f}），"
+            "不一定是最近一次 dp_rsi；各轮判定："
+        )
+    ]
+    lines += [f"    {h}" for h in cast("list[str]", v["history"])]
+    if v["stop"]:
+        lines.append(f"  停止条件：{v['stop']}")
+    return lines
+
+
 def _explain(ctx: StepContext, models: dict[str, str], *, synthetic: bool) -> str:
     head = [
         f"工作区 {ctx.ws.id}（模板 {ctx.ws.template}）val 上的流程都跑完了，最后一段是在 test 上各测一次：",
@@ -63,6 +82,7 @@ def _explain(ctx: StepContext, models: dict[str, str], *, synthetic: bool) -> st
         "为什么问你：test 每个 run 只能读一次，读了之后就不能再拿 test 的结果回头改选择（两个 sub-RSI 的规则）。",
         "val 上已经定下的结果：",
         *_val_summary(ctx),
+        *_version_lines(ctx),
         "批准：跑两次 final-test，结果写进 final_test.json，流程完成；之后这个 run 不能再测 test。",
         "拒绝：final-test 不跑，流程以失败结束；val 上的产物都还在。",
     ]
@@ -80,7 +100,9 @@ def _explain(ctx: StepContext, models: dict[str, str], *, synthetic: bool) -> st
 def final_test(ctx: StepContext) -> Outcome:
     """审批 → dgen final-test → dpolicy final-test。"""
     models = cast("dict[str, str]", ctx.find_output("models"))
-    dp_conf = Path(str(cast("list[str]", ctx.find_output("dp_configs"))[0]))
+    best = versions.best(ctx.ws)
+    dp_configs = best["dp_configs"] if best else ctx.find_output("dp_configs")
+    dp_conf = Path(str(cast("list[str]", dp_configs)[0]))
     consensus = dp_conf.parent / "r0" / "consensus.yaml"
     plan: Payload = {
         "data": f"dgen final-test：{len(models) - 1} 个重训模型 vs 基线，在 test 上一次",
@@ -142,6 +164,7 @@ def final_test(ctx: StepContext) -> Outcome:
         for k, v in pols.items()
     }
     results["decision_policy"] = str(dp_json)
+    results["final_version"] = cast("Value", best["version"] if best else None)
     results["dp_headline"] = cast("Value", json.loads(json.dumps(headline, default=str)))
     if a.state is State.APPROVED:
         ctx.store.mark(a.id, ok=True, result=results)

@@ -126,3 +126,29 @@ Chendie 按 Yile 的写法发布了 Training RSI：`CD22104/decision-model-train
 | 选 checkpoint 的评测集 | 完整 val（24,225 个地址） | harness 默认 |
 | 启动训练 | `trsi launch` 直接在本机 `ojh run --gpus <ids>`（tmux，立即返回）；用户一次性批准 `space` 后范围内的候选不再逐个问 | 经可插拔后端（taskmgr 等）；每次启动训练都要人在 `dm-rsi pending` 里批准 |
 | 交接 | `report.md` 第一节（Markdown 表）列当前方案每个种子的 run 目录和 checkpoint；机器可读的是 `incumbent.yaml` 和 `trials/*.json` | 流程产物（`base_model`、`models`） |
+
+## 修订（2026-11-24，第二次）：借鉴 Borui 的 `rsi-agent-harness`
+
+Borui 在 `BoruiXu/Decision-Model-Study@rsi-agent-harness`（`e34f705`）做了一个通用的、从上往下的 RSI 框架：顶层 orchestrator skill 派五个模块（data、train、tune、deliver、judge），机械判断全部交给命令行 `rsi`（校验、登记时重算指标、按规则升级、停止条件），agent 跳步骤时命令拒绝执行。dm-rsi 是从下往上把已有的 sub-RSI 接起来，两边方向不同。下面三点是它做得比 dm-rsi 好、能直接放进 dm-rsi 的，用户 2026-11-24 决定吸收。
+
+- **交接时重算**（对应他的 `rsi register` 重算 `rsi score`）：`data_compare` 读 `dgen compare` 的结果之前，dm-rsi 从同一份 `<name>_val.parquet` 自己重算 rows、pos、AUPRC、AUROC、Brier（`steps/contracts.py` 的 `recompute` / `check_reported`，容差 1e-6）。对不上就让这段流程失败，按「契约不符转成 issue」处理，不拿没核对过的数选模型。F1、precision、recall 依赖 sub-RSI 选的阈值，不核对。核对过的数作为产物 `verified_val`。
+- **每轮的尝试上限**（对应他的 `max_attempts_per_round` 和 `close-round`）：`train_rsi` 里，
+  - agent 写的新候选在登记审批**之前**先用 trsi 自己的规则检查（`outside_space`、`dead_ends`、候选文件能否解析），不合格的记进执行数据的 `refused`、跳过，算一次尝试（计入 `max_candidates`）。下次判断环节会被告知哪个候选被拒、为什么。这不是 Training 方向的问题，不起草 issue。
+  - 失败的试验按 `max_retries`（默认 1）重试：trsi 对 failed 的试验用同一条 `launch` 重跑，每次重试单独审批（说明里写上次的错误和第几次尝试）。重试用完仍失败，整段才失败。
+- **版本登记和停止条件**（对应他的 `rsi promote` 和 `rsi next`）：新模块 `versions.py`，记录在 `$DMRSI_HOME/work/<id>/versions.yaml`。
+  - 每次 `dp_rsi` 完成就是一个端到端的候选版本（训练方案 + 对比选出的模型 + Decision Policy 的 incumbent），用 dpolicy 的 val 目标值（默认 f1_e2e）判定：没有版本时成为 V1；比当前最佳严格高出 `stop.min_delta` 才升级，否则保留，连续保留数加一。
+  - 停止条件：已评估 `stop.max_rounds` 个候选版本（默认 4），或连续 `stop.patience` 个没有升级（默认 2）。命中后推理阶段直接指向 `final_test`，行动阶段拒绝其他流程，LLM 决策也绕不过去。
+  - `final_test` 测的是**当前最佳版本**的 Decision Policy 配置，不再是最近一次 `dp_rsi`；审批说明列出各轮判定。
+  - 工作区参数 `stop` 覆盖默认值。
+
+没有吸收的：
+
+- 审批由 agent 记录用户原话（`rsi approve --quote`）：dm-rsi 坚持审批只由人在自己的终端里做。
+- 要求各方向改成他的产物格式（manifest、可执行的 `model.predict`、JSONL）：dm-rsi 继续用各方向现有的文件契约。
+- 他的框架没有 Decision Policy 这一层（阈值是交付包的一部分），dm-rsi 保留三个方向。
+
+### 待定：val 和评测集分开
+
+Borui 把数据分成 trainset、valset、evalset、封存 test 四层：evalset 只给裁判，产出模型的模块看不到；每次升级判定用掉一次，有使用上限。dm-rsi 现在 Data 对比、Decision Policy 的 evolve、上面的版本判定都在 val 上，loop 转得越多，val 越被拟合，版本判定会偏乐观。test 只能读一次，不能替代 evalset。
+
+要做的话，可以从 val 里按 id 确定性地切出一块作为 dm-rsi 的 evalset，只给版本判定用，不交给 dgen 和 dpolicy。这会改变 Data 和 Decision Policy 拿到的 val，需要和 Bingqiao、Yile 对齐契约（走 issue），所以先不实施。
