@@ -74,7 +74,7 @@ def test_decision_priorities():
         "step": "004-dp_rsi",
         "flow": "dp_rsi",
         "owner": "decision-policy",
-        "suggest": "draft_issue",
+        "suggest": "wait",
     }
 
     def plan(*fs, lessons=()):
@@ -84,8 +84,11 @@ def test_decision_priorities():
     assert plan(nxt) == {"action": "flow", "flow": "data_rsi", "args": {}, "why": "缺"}
     assert plan(opened, nxt)["action"] == "resume"  # 同一时间只执行一段
     assert plan(waiting, nxt)["action"] == "wait"
-    assert plan(failed, nxt)["action"] == "draft_issue"
-    assert plan(failed, lessons=["issue:004-dp_rsi"])["action"] == "wait"
+    # 失败了就停下等人，不起草 issue，也不绕过去跑下一段
+    p = plan(failed, nxt)
+    assert p["action"] == "wait"
+    assert "dp_rsi 失败" in p["why"]
+    assert "decision-policy" in p["why"]
 
 
 def test_action_refuses_unknown_action_and_flow(meta_env):
@@ -142,17 +145,18 @@ def test_meta_loop_runs_flows_in_action_and_stops_at_gate(meta_env, tmp_path):
 
 
 @pytest.mark.slow
-def test_failed_flow_becomes_issue_draft_once(meta_env, gh, tmp_path, monkeypatch):
+def test_failed_flow_stops_loop_without_drafting_issue(meta_env, gh, tmp_path, monkeypatch):
     # 合成 val 只有 1 个 step：用 dpolicy 默认的 by: step 协议必然失败（真实的契约问题）
     monkeypatch.setitem(flows.TEMPLATES["synthetic"]["flows"], "dp_rsi", {"features": "from_rows"})
     records = run_loop(profile.profile(), iterations=20, run_dir=tmp_path / "loop")
     actions = [r.outputs[Stage.DECISION]["plan"]["action"] for r in records]
-    assert actions.count("draft_issue") == 1
-    [a] = [x for x in ApprovalStore(meta_env.approvals_dir).all() if x.kind is Kind.ISSUE]
-    assert str(a.detail["issue_title"]).startswith("[decision-policy]")
-    assert gh.created == []  # 只进审批队列
+    assert "draft_issue" not in actions
+    assert not [x for x in ApprovalStore(meta_env.approvals_dir).all() if x.kind is Kind.ISSUE]
+    assert gh.created == []
     assert records[-1].last["stop"] is True
-    assert "上次失败" in records[-1].outputs[Stage.DECISION]["plan"]["why"]
+    why = records[-1].outputs[Stage.DECISION]["plan"]["why"]
+    assert "dp_rsi 失败" in why
+    assert "work reset" in why
 
 
 @pytest.mark.slow

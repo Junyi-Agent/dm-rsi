@@ -11,7 +11,7 @@
    ``compare.json``……）推出同样的对象。内部格式一变，只有这里要改。
 
 两种来源都过同一套字段检查（:func:`need`），缺字段或类型不对时报 :class:`ContractError`，写明文件、字段、
-实际拿到了什么。流程失败后按「契约不符转成 issue」处理，不在 dm-rsi 里悄悄修补。
+实际拿到了什么。流程失败、loop 停下等人处理，不在 dm-rsi 里悄悄修补。
 """
 
 from __future__ import annotations

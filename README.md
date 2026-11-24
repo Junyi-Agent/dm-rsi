@@ -1,6 +1,6 @@
 # dm-rsi
 
-DM-RSI-Framework 的 meta RSI（"High-level controller"）：整条流程的统一入口。调度各方向的 sub-RSI 跑完从数据到 final-test 的流程，监控结果、诊断问题，给各方向起草 issue，也接收各方向提给 dm-rsi 的 issue。
+DM-RSI-Framework 的 meta RSI（"High-level controller"）：整条流程的统一入口。调度各方向的 sub-RSI 跑完从数据到 final-test 的流程，监控结果、诊断问题；流程失败时停下等人处理（不自动给各方向提 issue），也读取各方向提给 dm-rsi 的 issue。
 
 ```
 build-data → data-rsi → train → score → data-compare → dp-rsi → final-test
@@ -21,7 +21,7 @@ dm-rsi 是一个 xtra-rsi meta loop（profile `dm`）。**观察、推理、决�
 observe   : 工作区里已有的产物、每段流程执行的状态、待审批、submodule、issue
 reasoning : 缺什么、什么过时了、哪里失败了、归哪个方向
 decision  : 下一段流程 + 参数（prepare_data / train_rsi / train_base / score_base / data_rsi / retrain /
-            data_compare / dp_rsi / final_test），或 resume / draft_issue / wait
+            data_compare / dp_rsi / final_test），或 resume / wait
 action    : 执行这段流程（调 dgen / dpolicy / onejev-harness、提交 GPU 作业、登记审批）
 feedback  : 结果和 lessons；只剩人要做的事时停下
 ```
@@ -47,7 +47,7 @@ uv run dm-rsi work show syn        # 工作区里每段流程的执行和产物
 
 ## issue
 
-- dm-rsi → 各方向：`dm-rsi issue draft --to data --key <诊断键> --title ... --body ...` 进审批队列，`dm-rsi approve <id>` 后发到这个方向收 issue 的仓库（`dm-rsi.yaml` 的 `issue_repo`，不填就是 `Jireh-Chen/DM-RSI-Framework`；Training 发到 `CD22104/decision-model-training`），标题带 `[data]` / `[decision-policy]` / `[training]`。
+- dm-rsi → 各方向：meta loop 不自动起草（2026-11-24）。人需要时可以手动 `dm-rsi issue draft --to data --key <诊断键> --title ... --body ...` 进审批队列，`dm-rsi approve <id>` 后发到这个方向收 issue 的仓库（`dm-rsi.yaml` 的 `issue_repo`，不填就是 `Jireh-Chen/DM-RSI-Framework`；Training 发到 `CD22104/decision-model-training`），标题带 `[data]` / `[decision-policy]` / `[training]`。
 - 各方向 → dm-rsi：在本仓库提 issue（问题 / 需求 / 契约变更模板）。`dm-rsi issue list` 和 meta loop 的 observe 会读到。
 
 ## 文档

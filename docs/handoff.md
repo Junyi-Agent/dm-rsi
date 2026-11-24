@@ -2,7 +2,7 @@
 
 dm-rsi 读各方向结果的唯一入口是 `src/dm_rsi/steps/handoff.py`。各方向在自己的运行目录里写一个 `handoff.yaml`，dm-rsi 就只认这个文件的字段，不再读内部记录；内部记录（`archive.jsonl`、`incumbent.yaml`、`trials/`……）以后怎么改都不影响 dm-rsi。
 
-还没有 `handoff.yaml` 时，dm-rsi 从现在的内部记录推出同样的内容（兼容读取），两种来源过同一套字段检查。缺字段或类型不对时，这段流程失败，错误写明文件、字段和实际值，按「契约不符转成 issue」处理。
+还没有 `handoff.yaml` 时，dm-rsi 从现在的内部记录推出同样的内容（兼容读取），两种来源过同一套字段检查。缺字段或类型不对时，这段流程失败，错误写明文件、字段和实际值，loop 停下等人处理。
 
 公共字段：
 

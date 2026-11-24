@@ -8,10 +8,11 @@ Decision Policy、final-test，见 :mod:`dm_rsi.flows`）。流程执行记在�
 ``rsi viz`` 面板上展开行动阶段就能看到。
 
 - observe：工作区的产物、每次流程执行的状态、待审批、submodule、issue、上一轮的 lessons。
-- reasoning：findings。还没结束的执行 → 继续它或等人；失败的流程 → 归属方向、起草 issue；
+- reasoning：findings。还没结束的执行 → 继续它或等人；失败的流程 → 标出归属方向，停下等人处理；
   否则按 :func:`dm_rsi.flows.suggest` 指出缺什么。
 - decision：``plan``，``action`` 是 ``flow``（带 ``flow``、``args``）、``resume``（带 ``step``）、
-  ``draft_issue`` 或 ``wait``。同一时间只有一段流程在执行。
+  或 ``wait``。同一时间只有一段流程在执行。dm-rsi 不给各方向起草 issue（2026-11-24，用户决定）：
+  流程失败时 loop 停下，由人决定怎么处理、要不要和对应方向沟通。
 - action：执行 plan；``flow`` 的名字和参数在 :data:`dm_rsi.flows.ARGS` 之外的一律拒绝。
 - feedback：这段流程的结果、lessons；``wait`` 时 ``stop: true``，loop 停下等人。
 
@@ -46,7 +47,7 @@ if TYPE_CHECKING:
 
 _ = steps  # 导入即注册流程实现
 
-ACTIONS = ("flow", "resume", "draft_issue", "wait")
+ACTIONS = ("flow", "resume", "wait")
 
 # 流程 → 出问题时归哪个方向（issue 发给谁）；None = dm-rsi 自己或环境的问题
 OWNER: dict[str, str | None] = {
@@ -199,7 +200,7 @@ def reasoning(ctx: StageContext) -> Payload:
     failed = [e for e in latest.values() if e.get("state") == "failed"]
     for e in failed:
         owner = OWNER.get(str(e["flow"]))
-        findings.append(_finding("flow_failed", e, "draft_issue" if owner else "wait", owner=owner))
+        findings.append(_finding("flow_failed", e, "wait", owner=owner))
     nxt = flows.suggest(
         cast("Payload", up.get("artifacts") or {}), cast("str | None", up.get("template"))
     )
@@ -271,21 +272,14 @@ def reasoning(ctx: StageContext) -> Payload:
 # ---- decision ------------------------------------------------------------------------------
 
 
-def _issue_key(f: Payload) -> str:
-    return f"issue:{f.get('step')}"
-
-
 def decision(ctx: StageContext) -> Payload:
     """选一件事：先把进行中的流程推进完（同一时间只执行一段），再处理失败，再开始下一段流程。"""
     up = ctx.upstream
     findings = cast("list[Payload]", up.get("findings") or [])
-    lessons = {str(x) for x in cast("list[Value]", up.get("lessons") or [])}
     by_kind: dict[str, list[Payload]] = {}
     for f in findings:
         by_kind.setdefault(str(f.get("kind")), []).append(f)
-    fails = [
-        f for f in by_kind.get("flow_failed", []) if f.get("owner") and _issue_key(f) not in lessons
-    ]
+    fails = by_kind.get("flow_failed", [])
     plan: Payload
     if by_kind.get("open_execution"):
         f = by_kind["open_execution"][0]
@@ -298,11 +292,14 @@ def decision(ctx: StageContext) -> Payload:
         f = by_kind["waiting_human"][0]
         plan = {"action": "wait", "why": f"{f['step']} 等人：{f.get('evidence')}"}
     elif fails:
+        # 失败了就停下等人：dm-rsi 不起草 issue，也不绕过失败去跑别的流程
         f = fails[0]
+        owner = f"，归 {f['owner']} 方向" if f.get("owner") else "，dm-rsi 自己或环境的问题"
         plan = {
-            "action": "draft_issue",
-            "finding": f,
-            "why": f"{f['flow']} 失败，归 {f['owner']}：{f.get('evidence')}",
+            "action": "wait",
+            "why": f"{f['flow']} 失败（{f['step']}{owner}）：{f.get('evidence')}。"
+            f"看 $DMRSI_HOME/work/{up.get('workspace')}/{f['step']}/ 的日志，"
+            f"处理后 dm-rsi work reset {up.get('workspace')} {f['step']} 重来",
         }
     elif by_kind.get("next_flow"):
         f = by_kind["next_flow"][0]
@@ -362,7 +359,7 @@ def _run_flow(plan: Payload, up: Payload, out: Payload) -> Payload:
 
 
 def action(ctx: StageContext) -> Payload:
-    """执行 plan。行动 = 执行一段具体流程（或起草 issue / 等待）。"""
+    """执行 plan。行动 = 执行一段具体流程（或等待）。"""
     up = ctx.upstream
     plan = cast("Payload", up.get("plan") or {})
     act = str(plan.get("action"))
@@ -371,26 +368,6 @@ def action(ctx: StageContext) -> Payload:
         return {**out, "result": {"error": f"动作 {act!r} 不在动作表 {ACTIONS} 里，拒绝执行"}}
     if act in ("flow", "resume"):
         return _run_flow(plan, up, out)
-    if act == "draft_issue":
-        cfg = _cfg()
-        ws = _ws(cfg)
-        f = cast("Payload", plan.get("finding") or {})
-        res = issues.draft(
-            cfg,
-            _gh(),
-            ApprovalStore(cfg.approvals_dir),
-            direction=str(f.get("owner")),
-            key=f"{ws.id}/{f.get('step')}",
-            title=f"dm-rsi 执行 {f.get('flow')} 时失败（工作区 {ws.id}，{f.get('step')}）",
-            body=f"dm-rsi 在执行流程 `{f.get('flow')}` 时失败：\n\n```\n{f.get('evidence')}\n```",
-            evidence=[f"$DMRSI_HOME/work/{ws.id}/{f.get('step')}/"],
-        )
-        result: Payload = (
-            {"existing": res.existing.url}
-            if res.existing
-            else {"approval": res.approval.id if res.approval else None}
-        )
-        return {**out, "result": result, "issue_key": _issue_key(f)}
     waiting = [f"{p['id']} {p['title']}" for p in cast("list[Payload]", up.get("pending") or [])]
     return {**out, "result": {"why": plan.get("why"), "waiting": cast("Value", waiting)}}
 
@@ -404,8 +381,6 @@ def feedback(ctx: StageContext) -> Payload:
     act = str(up.get("action"))
     res = cast("Payload", up.get("result") or {})
     lessons = [str(x) for x in cast("list[Value]", up.get("lessons") or [])]
-    if isinstance(up.get("issue_key"), str):
-        lessons.append(str(up["issue_key"]))
     if act == "wait":
         verdict = "waiting"
     elif "error" in res:
@@ -413,7 +388,7 @@ def feedback(ctx: StageContext) -> Payload:
     elif act in ("flow", "resume"):
         verdict = str(res.get("state"))
     else:
-        verdict = "issue_drafted"
+        verdict = act
     return {
         "lessons": cast("Value", lessons[-50:]),
         "usage_offset": up.get("usage_offset") or 0,
