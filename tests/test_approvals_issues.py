@@ -117,9 +117,10 @@ def test_cli_approve_sends_issue(cfg, gh, capsys):
     rc = cli.main(["--home", str(cfg.home), "approve", res.approval.id], gh=gh)
     assert rc == 0
     assert len(gh.created) == 1
-    repo, title, _ = gh.created[0]
-    assert repo == cfg.upstream_repo
+    repo, title, body = gh.created[0]
+    assert repo == "CD22104/decision-model-training"  # Training 有自己的仓库
     assert title == "[training] t"
+    assert "@CD22104" in body
     assert store.get(res.approval.id).state is State.DONE
     assert "url" in (store.get(res.approval.id).result or {})
 
@@ -147,3 +148,15 @@ def test_inbox_and_outbound(cfg, gh):
     gh.add(cfg.upstream_repo, "别人的 issue", "无标记")
     assert [i.title for i in issues.inbox(cfg, gh)] == ["dp 需要 pool 分数"]
     assert [i.title for i in issues.outbound(cfg, gh)] == ["[data] y"]
+
+
+def test_issue_repo_per_direction(cfg, gh):
+    assert cfg.issue_repo("data") == cfg.upstream_repo  # fork 关了 issues，发到 Yile 的上游
+    assert cfg.issue_repo("decision-policy") == cfg.upstream_repo
+    assert cfg.issue_repo("training") == "CD22104/decision-model-training"
+    fp = issues.fingerprint("training", "k")
+    gh.add("CD22104/decision-model-training", "[training] x", f"b\n{issues.marker(fp)}")
+    store = ApprovalStore(cfg.approvals_dir)
+    res = issues.draft(cfg, gh, store, direction="training", key="k", title="x", body="b")
+    assert res.existing is not None  # 去重看的是 Training 自己的仓库
+    assert [i.repo for i in issues.outbound(cfg, gh)] == ["CD22104/decision-model-training"]

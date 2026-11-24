@@ -3,12 +3,13 @@ home: /ssd1/junyi/jev/dmrsi          # 数据、分数、run 产物、审批队�
 
 github:
   self: Junyi-Agent/dm-rsi                 # sub-RSI 给 dm-rsi 提 issue 的地方
-  upstream: Jireh-Chen/DM-RSI-Framework    # dm-rsi 给各方向提 issue 的地方（Data 的 fork 关了 issues）
+  upstream: Jireh-Chen/DM-RSI-Framework    # dm-rsi 给各方向提 issue 的默认仓库（Data 的 fork 关了 issues）
 
 # 各方向。submodule / package 为空表示还没有 sub-RSI（dm-rsi 直接调度）。
 directions:
   decision-policy:
     owner: Yile
+    github_login: Jireh-Chen
     issue_prefix: "[decision-policy]"
     submodule: subrsi/decision-policy
     branch: main
@@ -23,8 +24,14 @@ directions:
     package: rsi_skills/data
     module: dgen
   training:
-    owner: CD
+    owner: Chendie                     # 上游 README 里写作 CD
+    github_login: CD22104
     issue_prefix: "[training]"
+    issue_repo: CD22104/decision-model-training   # 独立仓库，开着 issues
+    submodule: subrsi/training
+    branch: main
+    package: rsi_skills/training
+    module: trsi
 
 backends:
   local: {kind: local}

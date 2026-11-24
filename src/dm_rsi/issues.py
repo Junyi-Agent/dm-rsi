@@ -1,7 +1,7 @@
 """issue 双向流（ADR 0001）。
 
 - dm-rsi → 各方向：``draft`` 登记一个 ``issue`` 类审批（草稿），人 ``dm-rsi approve <id>`` 后由
-  ``send`` 发到上游仓库，标题带方向前缀。正文末尾带指纹标记，用来去重、把 issue 对应回诊断。
+  ``send`` 发到这个方向收 issue 的仓库（``Config.issue_repo``），标题带方向前缀。正文末尾带指纹标记，用来去重、把 issue 对应回诊断。
 - 各方向 → dm-rsi：他们在 dm-rsi 自己的仓库提 issue；``inbox`` 读出来交给 observe。
 """
 
@@ -79,12 +79,13 @@ def draft(  # noqa: PLR0913 -- 都是 issue 的组成部分，keyword-only
     """起草发给某个方向的 issue。同指纹的 issue 已经 open 时不起草。"""
     d = cfg.direction(direction)
     fp = fingerprint(direction, key)
-    for issue in gh.list_issues(cfg.upstream_repo, state="open", search="dm-rsi:fp in:body"):
+    repo = cfg.issue_repo(direction)
+    for issue in gh.list_issues(repo, state="open", search="dm-rsi:fp in:body"):
         if fingerprint_of(issue.body) == fp:
             return DraftResult(existing=issue)
     full_title = title if title.startswith(d.issue_prefix) else f"{d.issue_prefix} {title}"
     detail: Payload = {
-        "repo": cfg.upstream_repo,
+        "repo": repo,
         "direction": direction,
         "key": key,
         "issue_title": full_title,
@@ -92,7 +93,7 @@ def draft(  # noqa: PLR0913 -- 都是 issue 的组成部分，keyword-only
     }
     detail["explain"] = (
         f"dm-rsi 起草了一个要发给 {direction} 方向（负责人 {d.owner}）的 issue。\n"
-        f"发到：https://github.com/{cfg.upstream_repo}（公开仓库，对方和所有人都看得到）\n"
+        f"发到：https://github.com/{repo}（公开仓库，对方和所有人都看得到）\n"
         f"标题：{full_title}\n正文：\n{_indent(str(detail['issue_body']))}\n"
         "批准：立即用你的 gh 账号发出。拒绝：不发；同一个诊断不会再起草，除非换了新证据。\n"
         "建议：看正文的证据是否站得住、是不是对方的问题（而不是 dm-rsi 自己的 bug），再批。"
@@ -132,6 +133,7 @@ def outbound(cfg: Config, gh: GitHub) -> list[Issue]:
     """dm-rsi 发出去的 issue（带指纹标记），含已关闭的，用来跟踪是否被处理。"""
     return [
         i
-        for i in gh.list_issues(cfg.upstream_repo, state="all", search="dm-rsi:fp in:body")
+        for repo in cfg.issue_repos
+        for i in gh.list_issues(repo, state="all", search="dm-rsi:fp in:body")
         if fingerprint_of(i.body)
     ]

@@ -10,7 +10,7 @@ build-data → data-rsi → train → score → data-compare → dp-rsi → fina
 | 方向 | sub-RSI | 在 dm-rsi 里 |
 |---|---|---|
 | Data（Bingqiao） | `subrsi/data`（`BingqiaoL/DM-RSI-Framework@data-generation-0.3`，`dgen`） | `dgen.rsi`、`dgen.compare` |
-| Training（CD） | 还没有 | dm-rsi 直接调 onejev-harness：`elliptic.train`、`elliptic.score` |
+| Training（Chendie，`CD22104`） | `subrsi/training` ← `CD22104/decision-model-training@main`（`trsi`） | 已接入 submodule；流程里暂时还是 dm-rsi 直接调 onejev-harness（`elliptic.train`、`elliptic.score`），换成调 `trsi` 待定 |
 | Decision Policy（Yile） | `subrsi/decision-policy`（`Jireh-Chen/DM-RSI-Framework@main`，`dpolicy`） | `dpolicy.rsi` |
 
 ## 怎么工作
@@ -47,7 +47,7 @@ uv run dm-rsi work show syn        # 工作区里每段流程的执行和产物
 
 ## issue
 
-- dm-rsi → 各方向：`dm-rsi issue draft --to data --key <诊断键> --title ... --body ...` 进审批队列，`dm-rsi approve <id>` 后发到 `Jireh-Chen/DM-RSI-Framework`，标题带 `[data]` / `[decision-policy]` / `[training]`。
+- dm-rsi → 各方向：`dm-rsi issue draft --to data --key <诊断键> --title ... --body ...` 进审批队列，`dm-rsi approve <id>` 后发到这个方向收 issue 的仓库（`dm-rsi.yaml` 的 `issue_repo`，不填就是 `Jireh-Chen/DM-RSI-Framework`；Training 发到 `CD22104/decision-model-training`），标题带 `[data]` / `[decision-policy]` / `[training]`。
 - 各方向 → dm-rsi：在本仓库提 issue（问题 / 需求 / 契约变更模板）。`dm-rsi issue list` 和 meta loop 的 observe 会读到。
 
 ## 文档

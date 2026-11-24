@@ -4,7 +4,7 @@
 
 ## 背景
 
-DM-RSI-Framework 按方向拆成多个 sub-RSI：Data（Bingqiao，`dgen`）、Training（CD，占位）、Output / Decision Policy（Yile，`dpolicy`）。各方向自成一体，只通过文件契约交接，但没有人负责把它们串成一条流程、看端到端的结果、把一个方向发现的问题转给另一个方向。README 里 "High-level controller" 一行的位置是「待定」。
+DM-RSI-Framework 按方向拆成多个 sub-RSI：Data（Bingqiao，`dgen`）、Training（Chendie，上游 README 里写作 CD，`trsi`）、Output / Decision Policy（Yile，`dpolicy`）。各方向自成一体，只通过文件契约交接，但没有人负责把它们串成一条流程、看端到端的结果、把一个方向发现的问题转给另一个方向。README 里 "High-level controller" 一行的位置是「待定」。
 
 约束：
 
@@ -103,3 +103,21 @@ DM-RSI-Framework 按方向拆成多个 sub-RSI：Data（Bingqiao，`dgen`）、T
 ## 验证
 
 （只由人类填写。状态改成「已验证」时填：验证人、日期、测了什么、结果。）
+
+## 修订（2026-11-24）：接入 Training RSI
+
+Chendie 按 Yile 的写法发布了 Training RSI：`CD22104/decision-model-training`，包 `rsi_skills/training`，命令 `python -m trsi`。它在卡时预算内选择基座、全参或 LoRA、超参，训练一律经 `ojh run`。
+
+- 加为第三个 submodule `subrsi/training`（`main`，`f50c3b2`），`dm-rsi.yaml` 的 `training` 方向补全 `github_login: CD22104`、`module: trsi`。
+- 它是独立仓库、开着 issues，所以方向配置新增 `issue_repo`：给 Training 的 issue 发到 `CD22104/decision-model-training`，其余方向仍发到 `github.upstream`。去重和跟踪（`outbound`）按各方向的仓库查。
+- 流程里暂时还没有调 `trsi`，`elliptic.train` / `elliptic.retrain` 仍由 dm-rsi 直接调 onejev-harness。换成调 `trsi` 的位置待定。
+
+接入时发现的差异：
+
+| 差异 | Training RSI | dm-rsi 现在的 elliptic 模板 |
+|---|---|---|
+| 训练配方 | 起点 `elephant_lora_1g.yaml`：1 卡，lr 1e-4，每步 64 行（团队实际用过的设置） | `pipelines/elliptic_elephant/recipes/elephant_lora_ddp_2g.yaml`：2 卡 DDP，lr 1e-5，每步 32 行，文件里写明"超参没调" |
+| 训练集 | 完整 `addr_txhist_noul/train.jsonl`（和 Decision Policy 一致） | Data 方向的切法：`train_sub40k` + `pool` |
+| 选 checkpoint 的评测集 | 完整 val（24,225 个地址） | harness 默认 |
+| 启动训练 | `trsi launch` 直接在本机 `ojh run --gpus <ids>`（tmux，立即返回）；用户一次性批准 `space` 后范围内的候选不再逐个问 | 经可插拔后端（taskmgr 等）；每次启动训练都要人在 `dm-rsi pending` 里批准 |
+| 交接 | `report.md` 第一节（Markdown 表）列当前方案每个种子的 run 目录和 checkpoint；机器可读的是 `incumbent.yaml` 和 `trials/*.json` | 流程产物（`base_model`、`models`） |

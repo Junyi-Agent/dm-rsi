@@ -9,3 +9,7 @@
 [submodule ".claude/jy-skills"]
 	path = .claude/jy-skills
 	url = https://github.com/Junyi-Agent/skills.git
+[submodule "training"]
+	path = subrsi/training
+	url = https://github.com/CD22104/decision-model-training
+	branch = main

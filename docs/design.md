@@ -11,7 +11,7 @@ dm-rsi 是 DM-RSI-Framework 里 "High-level controller" 方向的实现：决策
 | 方向 | 负责人 | 位置 | dm-rsi 怎么调用 |
 |---|---|---|---|
 | Data | Bingqiao | `subrsi/data`（`BingqiaoL/DM-RSI-Framework@data-generation-0.3`）的 `rsi_skills/data/`，`dgen` | CLI + agent 步骤 |
-| Training | CD | 还是占位 | dm-rsi 直接调 onejev-harness（`ojh`），等 Training RSI 出来再换成调它 |
+| Training | Chendie（`CD22104`） | `subrsi/training`：`CD22104/decision-model-training@main`，`trsi`（check/init/launch/adopt/collect/next/report） | 已接入 submodule；流程里暂时还是 dm-rsi 直接调 onejev-harness（`ojh`），换成调 `trsi` 待定 |
 | Output / Decision Policy | Yile | `subrsi/decision-policy`（`Jireh-Chen/DM-RSI-Framework@main`）的 `rsi_skills/decision_policy/`，`dpolicy` | CLI + agent 步骤 |
 
 - `subrsi/*` 是只读 submodule，dm-rsi 不在里面改代码、不提交。要改就提 issue，升级就移动 submodule 指针。
@@ -86,7 +86,7 @@ class Backend(Protocol):
 |---|---|---|
 | dm-rsi → Decision Policy | `Jireh-Chen/DM-RSI-Framework`，标题前缀 `[decision-policy]` | 草稿 → 人确认 → `gh issue create` |
 | dm-rsi → Data | 同上（Bingqiao 的 fork 关了 issues），前缀 `[data]`，正文 @ 负责人 | 同上 |
-| dm-rsi → Training | 同上，前缀 `[training]` | 同上 |
+| dm-rsi → Training | 发到 `CD22104/decision-model-training`（`issue_repo`），前缀 `[training]` | 同上 |
 | sub-RSI → dm-rsi | `Junyi-Agent/dm-rsi` 的 issues | 他们直接在 GitHub 上提；dm-rsi 的 observe 每轮读取 |
 
 - 草稿写在 `issues/outbox/<id>.yaml`（标题、正文、目标仓库、证据路径、指纹）。`dm-rsi issue list` 查看，`dm-rsi issue send <id>` 发出，`dm-rsi issue drop <id>` 丢弃。

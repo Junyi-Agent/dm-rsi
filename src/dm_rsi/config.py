@@ -31,6 +31,7 @@ class Direction:
     branch: str | None = None
     package: str | None = None
     module: str | None = None
+    issue_repo: str | None = None  # 这个方向收 issue 的仓库；不填就发到 ``github.upstream``
 
     def package_dir(self, root: Path) -> Path | None:
         """sub-RSI 包在本仓库里的路径（只读）。"""
@@ -57,6 +58,15 @@ class Config:
         except KeyError:
             msg = f"未知方向 {name!r}，可选：{', '.join(self.directions)}"
             raise ConfigError(msg) from None
+
+    def issue_repo(self, name: str) -> str:
+        """dm-rsi 给这个方向提 issue 的仓库。"""
+        return self.direction(name).issue_repo or self.upstream_repo
+
+    @property
+    def issue_repos(self) -> list[str]:
+        """dm-rsi 会往里发 issue 的所有仓库。"""
+        return sorted({self.issue_repo(n) for n in self.directions})
 
     @property
     def approvals_dir(self) -> Path:
@@ -117,6 +127,7 @@ def load(root: Path | None = None, *, home: Path | None = None) -> Config:
             branch=_opt(d, "branch"),
             package=_opt(d, "package"),
             module=_opt(d, "module"),
+            issue_repo=_opt(d, "issue_repo"),
         )
     env_home = os.environ.get("DMRSI_HOME")
     resolved = home or (Path(env_home) if env_home else Path(_str(raw, "home", "dm-rsi.yaml")))
